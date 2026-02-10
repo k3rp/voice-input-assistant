@@ -43,7 +43,7 @@ LANGUAGES = [
 DEFAULT_HOTKEY = HotkeyCombo(modifiers={"ctrl"}, main_key="'")
 
 # Number of capsules in the level meter
-NUM_CAPSULES = 16
+NUM_CAPSULES = 20
 
 
 class CapsuleMeter(QWidget):
@@ -51,15 +51,21 @@ class CapsuleMeter(QWidget):
     A discrete-capsule volume level meter, modelled after the macOS
     System Preferences "Input level" indicator.
 
-    Draws NUM_CAPSULES rounded rectangles side by side.  Capsules up
-    to the current level are "lit" (green); the rest are dark grey.
+    Draws NUM_CAPSULES thin rounded rectangles side by side.
+    - Capsules at or above the threshold and below the current level
+      are lit green.
+    - Capsules below the threshold are always grey (even if the level
+      reaches them).
+    - Unlit capsules are dark grey.
     """
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._level = 0          # 0..NUM_CAPSULES
-        self._lit_color = QColor("#4caf50")
-        self._dim_color = QColor("#3a3a3a")
+        self._level = 0              # 0..NUM_CAPSULES  (current volume)
+        self._threshold_idx = 0      # 0..NUM_CAPSULES  (silence threshold)
+        self._lit_color = QColor("#4caf50")    # green
+        self._below_color = QColor("#6e6e6e")  # grey for below-threshold lit capsules
+        self._dim_color = QColor("#3a3a3a")    # dark grey unlit
         self.setMinimumHeight(20)
         self.setMaximumHeight(20)
 
@@ -68,6 +74,13 @@ class CapsuleMeter(QWidget):
         count = max(0, min(NUM_CAPSULES, count))
         if count != self._level:
             self._level = count
+            self.update()
+
+    def set_threshold(self, idx: int):
+        """Set the threshold capsule index (0..NUM_CAPSULES)."""
+        idx = max(0, min(NUM_CAPSULES, idx))
+        if idx != self._threshold_idx:
+            self._threshold_idx = idx
             self.update()
 
     def sizeHint(self) -> QSize:
@@ -80,15 +93,19 @@ class CapsuleMeter(QWidget):
 
         w = self.width()
         h = self.height()
-        gap = 3
+        gap = 4
         total_gaps = gap * (NUM_CAPSULES - 1)
         capsule_w = max(1, (w - total_gaps) / NUM_CAPSULES)
-        radius = min(capsule_w / 2, h / 2, 4)
+        radius = min(capsule_w / 2, h / 2, 3)
 
         for i in range(NUM_CAPSULES):
             x = i * (capsule_w + gap)
             if i < self._level:
-                painter.setBrush(self._lit_color)
+                # Lit — green if at/above threshold, grey if below
+                if i >= self._threshold_idx:
+                    painter.setBrush(self._lit_color)
+                else:
+                    painter.setBrush(self._below_color)
             else:
                 painter.setBrush(self._dim_color)
             painter.drawRoundedRect(int(x), 0, int(capsule_w), h, radius, radius)
@@ -251,6 +268,13 @@ class MainWindow(QMainWindow):
         clamped = max(-80.0, min(0.0, rms_db))
         count = int((clamped + 80.0) / 80.0 * NUM_CAPSULES)
         self.capsule_meter.set_level(count)
+
+        # Map threshold slider dB → capsule index
+        threshold_db = float(self.threshold_slider.value())
+        t_clamped = max(-80.0, min(0.0, threshold_db))
+        t_idx = int((t_clamped + 80.0) / 80.0 * NUM_CAPSULES)
+        self.capsule_meter.set_threshold(t_idx)
+
         self.volume_db_label.setText(f"{rms_db:.1f} dB")
 
     # ------------------------------------------------------------------

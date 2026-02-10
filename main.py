@@ -2,8 +2,9 @@
 Voice Input Application — Entry Point
 
 Wires together:
-  hotkey press → start recording
-  hotkey release → stop recording → trim silence → transcribe → auto-paste
+  hotkey press  → sound chirp + recording bubble + start recording
+  hotkey release → sound chirp + spinner bubble + stop recording
+                 → trim silence → transcribe → auto-paste → dismiss bubble
 
 An always-on VolumeMonitor drives the live input level meter.
 On transcription, the text is pasted into the currently focused input
@@ -23,6 +24,8 @@ from pynput.keyboard import Controller as KbController, Key
 
 from recorder import AudioRecorder, VolumeMonitor, trim_silence
 from transcriber import transcribe
+from sounds import play_start, play_stop
+from overlay import RecordingBubble, SpinnerBubble
 from ui import MainWindow
 
 
@@ -42,6 +45,10 @@ class AppController(QObject):
         self.window = window
         self.recorder = AudioRecorder()
         self._kb = KbController()
+
+        # Overlay bubbles
+        self._recording_bubble = RecordingBubble()
+        self._spinner_bubble = SpinnerBubble()
 
         # Always-on volume monitor (like macOS input level)
         self.volume_monitor = VolumeMonitor(on_volume=self._on_volume_callback)
@@ -69,18 +76,24 @@ class AppController(QObject):
             self.window._set_status("⚠️  No API key set — cannot record")
             return
 
+        play_start()
+        self._recording_bubble.show_at_cursor()
         self.window.set_status_recording()
         self.recorder.start()
 
     @pyqtSlot()
     def on_stop_recording(self):
         audio = self.recorder.stop()
+        self._recording_bubble.dismiss()
+
+        play_stop()
 
         if audio is None or len(audio) == 0:
             self.window.set_status_idle()
             return
 
         self.window.set_status_transcribing()
+        self._spinner_bubble.show_at_cursor()
 
         # Run trim + transcription in a background thread
         threshold_db = self.window.get_threshold_db()
@@ -125,6 +138,9 @@ class AppController(QObject):
     def _on_transcription_done(self, text: str):
         print(f"\n>>> {text}\n")
 
+        # Dismiss the spinner bubble
+        self._spinner_bubble.dismiss()
+
         clipboard = QApplication.clipboard()
 
         # 1. Save current clipboard contents
@@ -156,6 +172,7 @@ class AppController(QObject):
     @pyqtSlot(str)
     def _on_transcription_failed(self, msg: str):
         print(f"[Info] {msg}")
+        self._spinner_bubble.dismiss()
         self.window.set_status_idle()
 
 
