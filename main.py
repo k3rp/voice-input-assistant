@@ -3,18 +3,23 @@ Voice Input Application — Entry Point
 
 Wires together:
   hotkey press → start recording
-  hotkey release → stop recording → trim silence → transcribe → print
+  hotkey release → stop recording → trim silence → transcribe → auto-paste
 
 An always-on VolumeMonitor drives the live input level meter.
+On transcription, the text is pasted into the currently focused input
+via a clipboard-swap technique (save → set → Cmd+V → restore).
 """
 
 from __future__ import annotations
 
 import sys
+import time
 import threading
 
-from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QMimeData, QObject, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import QApplication
+
+from pynput.keyboard import Controller as KbController, Key
 
 from recorder import AudioRecorder, VolumeMonitor, trim_silence
 from transcriber import transcribe
@@ -36,6 +41,7 @@ class AppController(QObject):
         super().__init__()
         self.window = window
         self.recorder = AudioRecorder()
+        self._kb = KbController()
 
         # Always-on volume monitor (like macOS input level)
         self.volume_monitor = VolumeMonitor(on_volume=self._on_volume_callback)
@@ -111,9 +117,40 @@ class AppController(QObject):
         else:
             self.transcription_failed.emit("No transcription returned.")
 
+    # ------------------------------------------------------------------
+    # Clipboard-swap auto-paste
+    # ------------------------------------------------------------------
+
     @pyqtSlot(str)
     def _on_transcription_done(self, text: str):
         print(f"\n>>> {text}\n")
+
+        clipboard = QApplication.clipboard()
+
+        # 1. Save current clipboard contents
+        saved_mime = QMimeData()
+        source_mime = clipboard.mimeData()
+        if source_mime is not None:
+            for fmt in source_mime.formats():
+                saved_mime.setData(fmt, source_mime.data(fmt))
+
+        # 2. Put transcription text into clipboard
+        clipboard.setText(text)
+
+        # 3. Simulate Cmd+V (macOS) to paste into the active input
+        #    A tiny delay lets the clipboard settle before the paste keystroke
+        time.sleep(0.05)
+        self._kb.press(Key.cmd)
+        self._kb.press("v")
+        self._kb.release("v")
+        self._kb.release(Key.cmd)
+
+        # 4. Restore original clipboard after a short delay
+        def _restore():
+            clipboard.setMimeData(saved_mime)
+
+        QTimer.singleShot(150, _restore)
+
         self.window.set_status_idle()
 
     @pyqtSlot(str)

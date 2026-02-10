@@ -5,7 +5,8 @@ combined volume meter + silence threshold, and status bar.
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import Qt, QSize, pyqtSignal, pyqtSlot
+from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -14,7 +15,6 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
-    QProgressBar,
     QPushButton,
     QSlider,
     QStatusBar,
@@ -41,6 +41,59 @@ LANGUAGES = [
 
 # Default hotkey: Ctrl + '
 DEFAULT_HOTKEY = HotkeyCombo(modifiers={"ctrl"}, main_key="'")
+
+# Number of capsules in the level meter
+NUM_CAPSULES = 16
+
+
+class CapsuleMeter(QWidget):
+    """
+    A discrete-capsule volume level meter, modelled after the macOS
+    System Preferences "Input level" indicator.
+
+    Draws NUM_CAPSULES rounded rectangles side by side.  Capsules up
+    to the current level are "lit" (green); the rest are dark grey.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._level = 0          # 0..NUM_CAPSULES
+        self._lit_color = QColor("#4caf50")
+        self._dim_color = QColor("#3a3a3a")
+        self.setMinimumHeight(20)
+        self.setMaximumHeight(20)
+
+    def set_level(self, count: int):
+        """Set how many capsules should be lit (0..NUM_CAPSULES)."""
+        count = max(0, min(NUM_CAPSULES, count))
+        if count != self._level:
+            self._level = count
+            self.update()
+
+    def sizeHint(self) -> QSize:
+        return QSize(300, 20)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(Qt.PenStyle.NoPen))
+
+        w = self.width()
+        h = self.height()
+        gap = 3
+        total_gaps = gap * (NUM_CAPSULES - 1)
+        capsule_w = max(1, (w - total_gaps) / NUM_CAPSULES)
+        radius = min(capsule_w / 2, h / 2, 4)
+
+        for i in range(NUM_CAPSULES):
+            x = i * (capsule_w + gap)
+            if i < self._level:
+                painter.setBrush(self._lit_color)
+            else:
+                painter.setBrush(self._dim_color)
+            painter.drawRoundedRect(int(x), 0, int(capsule_w), h, radius, radius)
+
+        painter.end()
 
 
 class MainWindow(QMainWindow):
@@ -110,26 +163,20 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(hotkey_group)
 
-        # --- Volume group (meter + silence threshold) ---
+        # --- Volume group (capsule meter + silence threshold) ---
         volume_group = QGroupBox("Volume")
         volume_layout = QVBoxLayout(volume_group)
 
-        # Live input level meter
+        # Capsule input-level meter
         meter_row = QHBoxLayout()
         meter_row.addWidget(QLabel("Input Level"))
-        self.volume_bar = QProgressBar()
-        self.volume_bar.setMinimum(0)
-        self.volume_bar.setMaximum(100)
-        self.volume_bar.setValue(0)
-        self.volume_bar.setTextVisible(False)
-        self.volume_bar.setStyleSheet(
-            "QProgressBar { min-height: 14px; max-height: 14px; }"
-            "QProgressBar::chunk { background-color: #4caf50; }"
-        )
-        meter_row.addWidget(self.volume_bar)
+        self.capsule_meter = CapsuleMeter()
+        meter_row.addWidget(self.capsule_meter)
         self.volume_db_label = QLabel("-∞ dB")
         self.volume_db_label.setFixedWidth(70)
-        self.volume_db_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.volume_db_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
         meter_row.addWidget(self.volume_db_label)
         volume_layout.addLayout(meter_row)
 
@@ -146,7 +193,9 @@ class MainWindow(QMainWindow):
         threshold_row.addWidget(self.threshold_slider)
         self.threshold_value_label = QLabel("-50 dB")
         self.threshold_value_label.setFixedWidth(70)
-        self.threshold_value_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.threshold_value_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
         threshold_row.addWidget(self.threshold_value_label)
         volume_layout.addLayout(threshold_row)
 
@@ -197,23 +246,12 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(float)
     def update_volume(self, rms_db: float):
-        """Update the live volume meter."""
-        # Map dB range [-80, 0] → [0, 100] for the progress bar
+        """Update the capsule meter with the current dB level."""
+        # Map dB range [-80, 0] → capsule count [0, NUM_CAPSULES]
         clamped = max(-80.0, min(0.0, rms_db))
-        pct = int((clamped + 80.0) / 80.0 * 100.0)
-        self.volume_bar.setValue(pct)
+        count = int((clamped + 80.0) / 80.0 * NUM_CAPSULES)
+        self.capsule_meter.set_level(count)
         self.volume_db_label.setText(f"{rms_db:.1f} dB")
-
-        # Colour the bar: green when above threshold, grey when below
-        threshold = self.threshold_slider.value()
-        if rms_db >= threshold:
-            colour = "#4caf50"  # green
-        else:
-            colour = "#9e9e9e"  # grey
-        self.volume_bar.setStyleSheet(
-            "QProgressBar { min-height: 14px; max-height: 14px; }"
-            f"QProgressBar::chunk {{ background-color: {colour}; }}"
-        )
 
     # ------------------------------------------------------------------
     # Status helpers
