@@ -1,6 +1,6 @@
 """
 PyQt6 main window: credential inputs, hotkey configuration,
-silence threshold slider, and status bar.
+combined volume meter + silence threshold, and status bar.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QProgressBar,
     QPushButton,
     QSlider,
     QStatusBar,
@@ -37,6 +38,9 @@ LANGUAGES = [
     ("Portuguese (BR)", "pt-BR"),
     ("Hindi", "hi-IN"),
 ]
+
+# Default hotkey: Ctrl + '
+DEFAULT_HOTKEY = HotkeyCombo(modifiers={"ctrl"}, main_key="'")
 
 
 class MainWindow(QMainWindow):
@@ -81,14 +85,6 @@ class MainWindow(QMainWindow):
         api_key_row.addWidget(self.api_key_toggle)
         creds_layout.addLayout(api_key_row)
 
-        # Project ID
-        project_row = QHBoxLayout()
-        project_row.addWidget(QLabel("Project ID:"))
-        self.project_id_input = QLineEdit()
-        self.project_id_input.setPlaceholderText("(optional) GCP project ID")
-        project_row.addWidget(self.project_id_input)
-        creds_layout.addLayout(project_row)
-
         # Language
         lang_row = QHBoxLayout()
         lang_row.addWidget(QLabel("Language:"))
@@ -104,7 +100,7 @@ class MainWindow(QMainWindow):
         hotkey_group = QGroupBox("Hotkey (Push-to-Talk)")
         hotkey_layout = QHBoxLayout(hotkey_group)
 
-        self.hotkey_label = QLabel("None")
+        self.hotkey_label = QLabel(str(DEFAULT_HOTKEY))
         self.hotkey_label.setStyleSheet("font-weight: bold; font-size: 14px;")
         hotkey_layout.addWidget(self.hotkey_label)
 
@@ -114,26 +110,47 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(hotkey_group)
 
-        # --- Silence threshold group ---
-        threshold_group = QGroupBox("Silence Threshold")
-        threshold_layout = QHBoxLayout(threshold_group)
+        # --- Volume group (meter + silence threshold) ---
+        volume_group = QGroupBox("Volume")
+        volume_layout = QVBoxLayout(volume_group)
 
-        threshold_layout.addWidget(QLabel("Sensitive"))
+        # Live input level meter
+        meter_row = QHBoxLayout()
+        meter_row.addWidget(QLabel("Input Level"))
+        self.volume_bar = QProgressBar()
+        self.volume_bar.setMinimum(0)
+        self.volume_bar.setMaximum(100)
+        self.volume_bar.setValue(0)
+        self.volume_bar.setTextVisible(False)
+        self.volume_bar.setStyleSheet(
+            "QProgressBar { min-height: 14px; max-height: 14px; }"
+            "QProgressBar::chunk { background-color: #4caf50; }"
+        )
+        meter_row.addWidget(self.volume_bar)
+        self.volume_db_label = QLabel("-∞ dB")
+        self.volume_db_label.setFixedWidth(70)
+        self.volume_db_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        meter_row.addWidget(self.volume_db_label)
+        volume_layout.addLayout(meter_row)
+
+        # Silence threshold slider
+        threshold_row = QHBoxLayout()
+        threshold_row.addWidget(QLabel("Silence Threshold"))
         self.threshold_slider = QSlider(Qt.Orientation.Horizontal)
         self.threshold_slider.setMinimum(-60)
         self.threshold_slider.setMaximum(-10)
-        self.threshold_slider.setValue(-30)
+        self.threshold_slider.setValue(-50)
         self.threshold_slider.setTickInterval(5)
         self.threshold_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.threshold_slider.valueChanged.connect(self._update_threshold_label)
-        threshold_layout.addWidget(self.threshold_slider)
-        threshold_layout.addWidget(QLabel("Aggressive"))
+        threshold_row.addWidget(self.threshold_slider)
+        self.threshold_value_label = QLabel("-50 dB")
+        self.threshold_value_label.setFixedWidth(70)
+        self.threshold_value_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        threshold_row.addWidget(self.threshold_value_label)
+        volume_layout.addLayout(threshold_row)
 
-        self.threshold_value_label = QLabel("-30 dB")
-        self.threshold_value_label.setFixedWidth(60)
-        threshold_layout.addWidget(self.threshold_value_label)
-
-        layout.addWidget(threshold_group)
+        layout.addWidget(volume_group)
 
         # --- Status bar ---
         self.status_bar = QStatusBar()
@@ -145,8 +162,21 @@ class MainWindow(QMainWindow):
         self._hotkey_listener.signals.hotkey_released.connect(self._on_hotkey_released)
         self._hotkey_listener.signals.key_event.connect(self._on_capture_key_event)
 
-        # Start the global listener
+        # Apply default hotkey and start the global listener
+        self._current_combo = DEFAULT_HOTKEY
+        self._hotkey_listener.set_hotkey(DEFAULT_HOTKEY)
         self._hotkey_listener.start()
+
+    # ------------------------------------------------------------------
+    # Focus: click anywhere outside a text field to clear focus
+    # ------------------------------------------------------------------
+
+    def mousePressEvent(self, event):
+        """Clear focus from text inputs when clicking elsewhere."""
+        focused = QApplication.focusWidget()
+        if isinstance(focused, QLineEdit):
+            focused.clearFocus()
+        super().mousePressEvent(event)
 
     # ------------------------------------------------------------------
     # Public accessors
@@ -155,14 +185,35 @@ class MainWindow(QMainWindow):
     def get_api_key(self) -> str:
         return self.api_key_input.text().strip()
 
-    def get_project_id(self) -> str:
-        return self.project_id_input.text().strip()
-
     def get_language_code(self) -> str:
         return self.language_combo.currentData()
 
     def get_threshold_db(self) -> float:
         return float(self.threshold_slider.value())
+
+    # ------------------------------------------------------------------
+    # Live volume meter
+    # ------------------------------------------------------------------
+
+    @pyqtSlot(float)
+    def update_volume(self, rms_db: float):
+        """Update the live volume meter."""
+        # Map dB range [-80, 0] → [0, 100] for the progress bar
+        clamped = max(-80.0, min(0.0, rms_db))
+        pct = int((clamped + 80.0) / 80.0 * 100.0)
+        self.volume_bar.setValue(pct)
+        self.volume_db_label.setText(f"{rms_db:.1f} dB")
+
+        # Colour the bar: green when above threshold, grey when below
+        threshold = self.threshold_slider.value()
+        if rms_db >= threshold:
+            colour = "#4caf50"  # green
+        else:
+            colour = "#9e9e9e"  # grey
+        self.volume_bar.setStyleSheet(
+            "QProgressBar { min-height: 14px; max-height: 14px; }"
+            f"QProgressBar::chunk {{ background-color: {colour}; }}"
+        )
 
     # ------------------------------------------------------------------
     # Status helpers
@@ -261,4 +312,3 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self._hotkey_listener.stop()
         super().closeEvent(event)
-

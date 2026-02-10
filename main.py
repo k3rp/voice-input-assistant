@@ -4,6 +4,8 @@ Voice Input Application — Entry Point
 Wires together:
   hotkey press → start recording
   hotkey release → stop recording → trim silence → transcribe → print
+
+An always-on VolumeMonitor drives the live input level meter.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ import threading
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import QApplication
 
-from recorder import AudioRecorder, trim_silence
+from recorder import AudioRecorder, VolumeMonitor, trim_silence
 from transcriber import transcribe
 from ui import MainWindow
 
@@ -28,11 +30,16 @@ class AppController(QObject):
 
     transcription_done = pyqtSignal(str)   # emitted when result is ready
     transcription_failed = pyqtSignal(str)  # emitted on error or silence
+    volume_update = pyqtSignal(float)       # live volume dB from audio thread
 
     def __init__(self, window: MainWindow):
         super().__init__()
         self.window = window
         self.recorder = AudioRecorder()
+
+        # Always-on volume monitor (like macOS input level)
+        self.volume_monitor = VolumeMonitor(on_volume=self._on_volume_callback)
+        self.volume_monitor.start()
 
         # Connect window signals
         self.window.recording_requested.connect(self.on_start_recording)
@@ -41,6 +48,13 @@ class AppController(QObject):
         # Connect result signals back to UI updates
         self.transcription_done.connect(self._on_transcription_done)
         self.transcription_failed.connect(self._on_transcription_failed)
+
+        # Connect volume signal to UI meter
+        self.volume_update.connect(self.window.update_volume)
+
+    def _on_volume_callback(self, rms_db: float):
+        """Called from the audio thread — emit a Qt signal to cross threads safely."""
+        self.volume_update.emit(rms_db)
 
     @pyqtSlot()
     def on_start_recording(self):
@@ -55,6 +69,7 @@ class AppController(QObject):
     @pyqtSlot()
     def on_stop_recording(self):
         audio = self.recorder.stop()
+
         if audio is None or len(audio) == 0:
             self.window.set_status_idle()
             return
@@ -122,4 +137,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

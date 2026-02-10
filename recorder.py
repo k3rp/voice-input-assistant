@@ -87,6 +87,54 @@ class AudioRecorder:
                 self._frames.append(indata.copy())
 
 
+class VolumeMonitor:
+    """
+    Always-on microphone monitor that reports live input volume.
+
+    Opens a lightweight input stream on construction and continuously
+    reports RMS dB via the on_volume callback — like the macOS
+    System Preferences input level meter.
+    """
+
+    def __init__(self, on_volume=None):
+        self._on_volume = on_volume
+        self._stream: Optional[sd.InputStream] = None
+
+    def start(self):
+        """Start monitoring mic input."""
+        if self._stream is not None:
+            return
+        self._stream = sd.InputStream(
+            samplerate=SAMPLE_RATE,
+            channels=CHANNELS,
+            dtype=DTYPE,
+            blocksize=BLOCK_SIZE,
+            callback=self._callback,
+        )
+        self._stream.start()
+
+    def stop(self):
+        """Stop monitoring."""
+        if self._stream is not None:
+            self._stream.stop()
+            self._stream.close()
+            self._stream = None
+
+    def _callback(self, indata: np.ndarray, frames: int, time_info, status):
+        if self._on_volume is None:
+            return
+        samples = indata.flatten().astype(np.float64)
+        rms = np.sqrt(np.mean(samples ** 2))
+        if rms > 0:
+            rms_db = 20.0 * np.log10(rms / 32768.0)
+        else:
+            rms_db = -120.0
+        try:
+            self._on_volume(rms_db)
+        except Exception:
+            pass
+
+
 def trim_silence(
     audio: np.ndarray,
     threshold_db: float = -30.0,
