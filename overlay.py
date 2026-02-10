@@ -43,7 +43,7 @@ def _reactivate_app(app):
 
 
 # Shared constants
-_SIZE = 44           # bubble diameter
+_SIZE = 32           # bubble diameter
 _OFFSET = QPoint(20, 20)  # offset from cursor so the bubble doesn't sit on top
 
 
@@ -141,7 +141,7 @@ class RecordingBubble(_BaseBubble):
 
         # Pulsing red circle in the centre
         pulse = 0.5 + 0.5 * math.sin(self._pulse_phase)  # 0..1
-        radius = int(6 + 3 * pulse)
+        radius = int(7 + 4 * pulse)
         alpha = int(180 + 75 * pulse)
         cx, cy = _SIZE // 2, _SIZE // 2
         painter.setBrush(QColor(220, 50, 50, alpha))
@@ -193,7 +193,7 @@ class SpinnerBubble(_BaseBubble):
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
 
-        margin = 10
+        margin = 7
         rect = self.rect().adjusted(margin, margin, -margin, -margin)
         # drawArc expects 1/16th of a degree
         start_angle = self._angle * 16

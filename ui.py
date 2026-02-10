@@ -5,8 +5,12 @@ combined volume meter + silence threshold, and status bar.
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QSize, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QColor, QPainter, QPen
+import json
+import os
+from pathlib import Path
+
+from PyQt6.QtCore import Qt, QSize, QRect, pyqtSignal, pyqtSlot
+from PyQt6.QtGui import QColor, QFont, QPainter, QPen
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -18,26 +22,96 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSlider,
     QStatusBar,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QVBoxLayout,
     QWidget,
 )
 
 from hotkey import HotkeyCombo, HotkeyListener, key_to_str, _MODIFIER_MAP
 
+# Persistent config file path (next to the script)
+_CONFIG_PATH = Path(__file__).resolve().parent / ".voice_input_config.json"
 
-# Common language codes for the dropdown
+
+def _load_config() -> dict:
+    try:
+        return json.loads(_CONFIG_PATH.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_config(data: dict):
+    _CONFIG_PATH.write_text(json.dumps(data, indent=2))
+
+
+# Common language codes for the dropdown: (display_name, description, code)
 LANGUAGES = [
-    ("English (US)", "en-US"),
-    ("English (UK)", "en-GB"),
-    ("Chinese (Mandarin)", "zh"),
-    ("Spanish", "es-ES"),
-    ("French", "fr-FR"),
-    ("German", "de-DE"),
-    ("Japanese", "ja-JP"),
-    ("Korean", "ko-KR"),
-    ("Portuguese (BR)", "pt-BR"),
-    ("Hindi", "hi-IN"),
+    ("English (US)", "General American English", "en-US"),
+    ("English (UK)", "British English", "en-GB"),
+    ("Chinese (Mandarin)", "普通话", "zh"),
+    ("Spanish", "Español – España", "es-ES"),
+    ("French", "Français – France", "fr-FR"),
+    ("German", "Deutsch – Deutschland", "de-DE"),
+    ("Japanese", "日本語", "ja-JP"),
+    ("Korean", "한국어", "ko-KR"),
+    ("Portuguese (BR)", "Português – Brasil", "pt-BR"),
+    ("Hindi", "हिन्दी – भारत", "hi-IN"),
 ]
+
+
+class _TwoLineDelegate(QStyledItemDelegate):
+    """
+    Combo-box item delegate that draws a bold title on the first line
+    and a smaller grey description on the second, like the Cursor
+    privacy-mode dropdown.
+    """
+
+    _PADDING = 6
+    _LINE_SPACING = 2
+
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index):
+        self.initStyleOption(option, index)
+
+        # Draw selection / hover background
+        style = option.widget.style() if option.widget else QApplication.style()
+        style.drawPrimitive(style.PrimitiveElement.PE_PanelItemViewItem, option, painter, option.widget)
+
+        rect: QRect = option.rect.adjusted(self._PADDING, self._PADDING,
+                                            -self._PADDING, -self._PADDING)
+
+        title = index.data(Qt.ItemDataRole.DisplayRole) or ""
+        description = index.data(Qt.ItemDataRole.UserRole + 1) or ""
+
+        # Title (bold)
+        title_font = QFont(option.font)
+        title_font.setBold(True)
+        painter.setFont(title_font)
+        painter.setPen(option.palette.color(option.palette.ColorRole.Text))
+        title_rect = QRect(rect.x(), rect.y(), rect.width(), painter.fontMetrics().height())
+        painter.drawText(title_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, title)
+
+        # Description (smaller, grey)
+        desc_font = QFont(option.font)
+        desc_font.setPointSizeF(option.font.pointSizeF() * 0.85)
+        painter.setFont(desc_font)
+        painter.setPen(QColor("#999999"))
+        desc_y = title_rect.bottom() + self._LINE_SPACING
+        desc_rect = QRect(rect.x(), desc_y, rect.width(), painter.fontMetrics().height())
+        painter.drawText(desc_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, description)
+
+    def sizeHint(self, option: QStyleOptionViewItem, index) -> QSize:
+        self.initStyleOption(option, index)
+        title_font = QFont(option.font)
+        title_font.setBold(True)
+        desc_font = QFont(option.font)
+        desc_font.setPointSizeF(option.font.pointSizeF() * 0.85)
+
+        from PyQt6.QtGui import QFontMetrics
+        title_h = QFontMetrics(title_font).height()
+        desc_h = QFontMetrics(desc_font).height()
+        total = title_h + self._LINE_SPACING + desc_h + self._PADDING * 2
+        return QSize(option.rect.width(), total)
 
 # Default hotkey: Ctrl + '
 DEFAULT_HOTKEY = HotkeyCombo(modifiers={"ctrl"}, main_key="'")
@@ -152,19 +226,32 @@ class MainWindow(QMainWindow):
         self.api_key_toggle.setFixedWidth(60)
         self.api_key_toggle.setCheckable(True)
         self.api_key_toggle.toggled.connect(self._toggle_api_key_visibility)
-        api_key_row.addWidget(self.api_key_toggle)
+        self.api_key_save = QPushButton("Save")
+        self.api_key_save.setFixedWidth(60)
+        self.api_key_save.clicked.connect(self._save_api_key)
+        btn_group = QHBoxLayout()
+        btn_group.setSpacing(4)
+        btn_group.addWidget(self.api_key_toggle)
+        btn_group.addWidget(self.api_key_save)
+        api_key_row.addLayout(btn_group)
         creds_layout.addLayout(api_key_row)
 
-        # Language
+        # Language (two-line delegate: bold title + grey description)
         lang_row = QHBoxLayout()
         lang_row.addWidget(QLabel("Language:"))
         self.language_combo = QComboBox()
-        for display, code in LANGUAGES:
-            self.language_combo.addItem(f"{display} ({code})", code)
+        self.language_combo.setItemDelegate(_TwoLineDelegate(self.language_combo))
+        for display, description, code in LANGUAGES:
+            self.language_combo.addItem(display, code)
+            idx = self.language_combo.count() - 1
+            self.language_combo.setItemData(idx, description, Qt.ItemDataRole.UserRole + 1)
         lang_row.addWidget(self.language_combo)
         creds_layout.addLayout(lang_row)
 
         layout.addWidget(creds_group)
+
+        # Load saved API key (if any)
+        self._load_saved_config()
 
         # --- Hotkey group ---
         hotkey_group = QGroupBox("Hotkey (Push-to-Talk)")
@@ -184,22 +271,23 @@ class MainWindow(QMainWindow):
         volume_group = QGroupBox("Volume")
         volume_layout = QVBoxLayout(volume_group)
 
+        # Shared label width so the meter and slider left-align
+        _label_w = 115
+
         # Capsule input-level meter
         meter_row = QHBoxLayout()
-        meter_row.addWidget(QLabel("Input Level"))
+        meter_label = QLabel("Input Level")
+        meter_label.setFixedWidth(_label_w)
+        meter_row.addWidget(meter_label)
         self.capsule_meter = CapsuleMeter()
         meter_row.addWidget(self.capsule_meter)
-        self.volume_db_label = QLabel("-∞ dB")
-        self.volume_db_label.setFixedWidth(70)
-        self.volume_db_label.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
-        meter_row.addWidget(self.volume_db_label)
         volume_layout.addLayout(meter_row)
 
         # Silence threshold slider
         threshold_row = QHBoxLayout()
-        threshold_row.addWidget(QLabel("Silence Threshold"))
+        threshold_label = QLabel("Silence Threshold")
+        threshold_label.setFixedWidth(_label_w)
+        threshold_row.addWidget(threshold_label)
         self.threshold_slider = QSlider(Qt.Orientation.Horizontal)
         self.threshold_slider.setMinimum(-60)
         self.threshold_slider.setMaximum(-10)
@@ -261,13 +349,23 @@ class MainWindow(QMainWindow):
     # Live volume meter
     # ------------------------------------------------------------------
 
+    _SMOOTHING_RISE = 0.35   # EMA factor when level is rising (fast attack)
+    _SMOOTHING_FALL = 0.08   # EMA factor when level is falling (slow decay)
+
     @pyqtSlot(float)
     def update_volume(self, rms_db: float):
-        """Update the capsule meter with the current dB level."""
+        """Update the capsule meter with the current dB level (smoothed)."""
         # Map dB range [-80, 0] → capsule count [0, NUM_CAPSULES]
         clamped = max(-80.0, min(0.0, rms_db))
-        count = int((clamped + 80.0) / 80.0 * NUM_CAPSULES)
-        self.capsule_meter.set_level(count)
+        raw = (clamped + 80.0) / 80.0 * NUM_CAPSULES
+
+        # Exponential moving average: fast attack, slow decay
+        prev = getattr(self, "_smooth_level", 0.0)
+        alpha = self._SMOOTHING_RISE if raw >= prev else self._SMOOTHING_FALL
+        smoothed = prev + alpha * (raw - prev)
+        self._smooth_level = smoothed
+
+        self.capsule_meter.set_level(int(round(smoothed)))
 
         # Map threshold slider dB → capsule index
         threshold_db = float(self.threshold_slider.value())
@@ -275,7 +373,6 @@ class MainWindow(QMainWindow):
         t_idx = int((t_clamped + 80.0) / 80.0 * NUM_CAPSULES)
         self.capsule_meter.set_threshold(t_idx)
 
-        self.volume_db_label.setText(f"{rms_db:.1f} dB")
 
     # ------------------------------------------------------------------
     # Status helpers
@@ -294,7 +391,7 @@ class MainWindow(QMainWindow):
         self._set_status("⏳  Transcribing…")
 
     # ------------------------------------------------------------------
-    # API key visibility toggle
+    # API key visibility toggle & persistence
     # ------------------------------------------------------------------
 
     @pyqtSlot(bool)
@@ -305,6 +402,21 @@ class MainWindow(QMainWindow):
         else:
             self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
             self.api_key_toggle.setText("Show")
+
+    @pyqtSlot()
+    def _save_api_key(self):
+        """Persist the current API key to the config file."""
+        cfg = _load_config()
+        cfg["api_key"] = self.api_key_input.text().strip()
+        _save_config(cfg)
+        self._set_status("API key saved")
+
+    def _load_saved_config(self):
+        """Restore API key from the config file (if present)."""
+        cfg = _load_config()
+        key = cfg.get("api_key", "")
+        if key:
+            self.api_key_input.setText(key)
 
     # ------------------------------------------------------------------
     # Threshold slider
