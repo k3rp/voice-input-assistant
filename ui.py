@@ -48,8 +48,8 @@ NUM_CAPSULES = 20
 
 class CapsuleMeter(QWidget):
     """
-    A discrete-capsule volume level meter, modelled after the macOS
-    System Preferences "Input level" indicator.
+    A discrete-capsule volume level meter, modelled after an OS
+    "Input level" indicator.
 
     Draws NUM_CAPSULES thin rounded rectangles side by side.
     - Capsules at or above the threshold and below the current level
@@ -63,7 +63,7 @@ class CapsuleMeter(QWidget):
         super().__init__(parent)
         self._level = 0              # 0..NUM_CAPSULES  (current volume)
         self._threshold_idx = 0      # 0..NUM_CAPSULES  (silence threshold)
-        self._lit_color = QColor("#4caf50")    # green
+        self._lit_color = QColor("#7a9a7c")    # muted grey-green
         self._below_color = QColor("#6e6e6e")  # grey for below-threshold lit capsules
         self._dim_color = QColor("#3a3a3a")    # dark grey unlit
         self.setMinimumHeight(20)

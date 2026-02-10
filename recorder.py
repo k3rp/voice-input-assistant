@@ -92,8 +92,8 @@ class VolumeMonitor:
     Always-on microphone monitor that reports live input volume.
 
     Opens a lightweight input stream on construction and continuously
-    reports RMS dB via the on_volume callback — like the macOS
-    System Preferences input level meter.
+    reports RMS dB via the on_volume callback — like an OS
+    input level meter.
     """
 
     def __init__(self, on_volume=None):

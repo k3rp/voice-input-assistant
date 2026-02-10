@@ -8,19 +8,22 @@ Wires together:
 
 An always-on VolumeMonitor drives the live input level meter.
 On transcription, the text is pasted into the currently focused input
-via a clipboard-swap technique (save → set → Cmd+V → restore).
+via a clipboard-swap technique (save → set → paste keystroke → restore).
 """
 
 from __future__ import annotations
 
+import platform
 import sys
-import time
 import threading
 
 from PyQt6.QtCore import QMimeData, QObject, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import QApplication
 
 from pynput.keyboard import Controller as KbController, Key
+
+# Determine the correct modifier for paste (Cmd on macOS, Ctrl elsewhere)
+_PASTE_MODIFIER = Key.cmd if platform.system() == "Darwin" else Key.ctrl
 
 from recorder import AudioRecorder, VolumeMonitor, trim_silence
 from transcriber import transcribe
@@ -50,7 +53,7 @@ class AppController(QObject):
         self._recording_bubble = RecordingBubble()
         self._spinner_bubble = SpinnerBubble()
 
-        # Always-on volume monitor (like macOS input level)
+        # Always-on volume monitor (like an OS input level meter)
         self.volume_monitor = VolumeMonitor(on_volume=self._on_volume_callback)
         self.volume_monitor.start()
 
@@ -153,19 +156,23 @@ class AppController(QObject):
         # 2. Put transcription text into clipboard
         clipboard.setText(text)
 
-        # 3. Simulate Cmd+V (macOS) to paste into the active input
-        #    A tiny delay lets the clipboard settle before the paste keystroke
-        time.sleep(0.05)
-        self._kb.press(Key.cmd)
-        self._kb.press("v")
-        self._kb.release("v")
-        self._kb.release(Key.cmd)
+        # 3. Schedule the paste keystroke via QTimer so the event loop
+        #    can process the clipboard ownership change first.
+        #    (Using time.sleep here would block the event loop and
+        #    prevent Qt from serving clipboard data to the target app.)
+        def _do_paste():
+            self._kb.press(_PASTE_MODIFIER)
+            self._kb.press("v")
+            self._kb.release("v")
+            self._kb.release(_PASTE_MODIFIER)
 
-        # 4. Restore original clipboard after a short delay
+        QTimer.singleShot(80, _do_paste)
+
+        # 4. Restore original clipboard after paste has had time to complete
         def _restore():
             clipboard.setMimeData(saved_mime)
 
-        QTimer.singleShot(150, _restore)
+        QTimer.singleShot(350, _restore)
 
         self.window.set_status_idle()
 
