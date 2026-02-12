@@ -137,7 +137,7 @@ class AppController(QObject):
 
         # Post-process via Gemini if a prompt is configured
         if prompt:
-            print("[Postprocess] Sending to Gemini…")
+            print(f"[Postprocess] Sending to Gemini… (Transcription: {text})")
             text = postprocess(text, prompt)
             print(f"[Postprocess] Result: {text}")
 

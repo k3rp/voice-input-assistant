@@ -2,6 +2,8 @@
 
 A push-to-talk desktop app that records your voice, sends it to **Google Cloud Speech-to-Text**, and automatically pastes the transcription into whatever app has focus. Optionally post-processes the transcript with **Gemini** before pasting.
 
+Supports macOS and Linux (X11 only; Wayland is not supported).
+
 ## Prerequisites
 
 - **Python 3.10+**
@@ -55,5 +57,5 @@ python main.py
 
 ### Post Transcription Editing
 
-Enter a prompt in the "Post Transcription Editing" box. Each transcript is sent to **Gemini 2.0 Flash** along with your prompt before being pasted. Leave the box empty to disable post-processing.
+Enter a prompt in the "Post Transcription Editing" box. Each transcript is sent to **Gemini** along with your prompt before being pasted. Leave the box empty to disable post-processing.
 
