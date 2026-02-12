@@ -209,6 +209,7 @@ def main():
     print(_SETUP_BANNER)
 
     app = QApplication(sys.argv)
+    app.setOrganizationName("VoiceInput")
     app.setApplicationName("Voice Input")
 
     window = MainWindow()

@@ -76,7 +76,7 @@ def transcribe(
             audio_channel_count=1,
         ),
         language_codes=[language_code],
-        model="short",
+        model="latest_short",
         features=cloud_speech.RecognitionFeatures(
             enable_automatic_punctuation=True,
         ),

@@ -5,7 +5,7 @@ combined volume meter + silence threshold, and status bar.
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QSize, QRect, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import Qt, QSize, QRect, QSettings, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen
 from PyQt6.QtWidgets import (
     QApplication,
@@ -31,7 +31,7 @@ from hotkey import HotkeyCombo, HotkeyListener, key_to_str, _MODIFIER_MAP
 LANGUAGES = [
     ("English (US)", "General American English", "en-US"),
     ("English (UK)", "British English", "en-GB"),
-    ("Chinese (Mandarin)", "普通话", "zh"),
+    ("Chinese (Mandarin)", "普通话 – 简体", "cmn-Hans-CN"),
     ("Spanish", "Español – España", "es-ES"),
     ("French", "Français – France", "fr-FR"),
     ("German", "Deutsch – Deutschland", "de-DE"),
@@ -304,12 +304,12 @@ class MainWindow(QMainWindow):
         self.threshold_slider = QSlider(Qt.Orientation.Horizontal)
         self.threshold_slider.setMinimum(-60)
         self.threshold_slider.setMaximum(-10)
-        self.threshold_slider.setValue(-50)
+        self.threshold_slider.setValue(-55)
         self.threshold_slider.setTickInterval(5)
         self.threshold_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.threshold_slider.valueChanged.connect(self._update_threshold_label)
         threshold_row.addWidget(self.threshold_slider)
-        self.threshold_value_label = QLabel("-50 dB")
+        self.threshold_value_label = QLabel("-55 dB")
         self.threshold_value_label.setFixedWidth(70)
         self.threshold_value_label.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
@@ -329,10 +329,17 @@ class MainWindow(QMainWindow):
         self._hotkey_listener.signals.hotkey_released.connect(self._on_hotkey_released)
         self._hotkey_listener.signals.key_event.connect(self._on_capture_key_event)
 
-        # Apply default hotkey and start the global listener
-        self._current_combo = DEFAULT_HOTKEY
-        self._hotkey_listener.set_hotkey(DEFAULT_HOTKEY)
+        # --- Restore saved settings (or fall back to defaults) ---
+        self._settings = QSettings()
+        self._restore_settings()
+
+        # Start the global listener with the (possibly restored) hotkey
+        self._hotkey_listener.set_hotkey(self._current_combo)
         self._hotkey_listener.start()
+
+        # --- Auto-save on change ---
+        self.language_combo.currentIndexChanged.connect(self._save_settings)
+        self.threshold_slider.valueChanged.connect(self._save_settings)
 
     # ------------------------------------------------------------------
     # Focus: click anywhere outside a text field to clear focus
@@ -448,6 +455,7 @@ class MainWindow(QMainWindow):
         self.hotkey_label.setText(str(combo))
         self.hotkey_btn.setText("Set Hotkey")
         self.hotkey_btn.setEnabled(True)
+        self._save_settings()
 
     # ------------------------------------------------------------------
     # Hotkey press / release (forwarded as signals)
@@ -462,9 +470,50 @@ class MainWindow(QMainWindow):
         self.recording_stopped.emit()
 
     # ------------------------------------------------------------------
+    # Settings persistence (QSettings — macOS plist / Windows registry)
+    # ------------------------------------------------------------------
+
+    def _restore_settings(self):
+        """Load saved settings or apply defaults."""
+        # Language
+        saved_lang = self._settings.value("language", None)
+        if saved_lang is not None:
+            for i in range(self.language_combo.count()):
+                if self.language_combo.itemData(i) == saved_lang:
+                    self.language_combo.setCurrentIndex(i)
+                    break
+
+        # Silence threshold
+        saved_threshold = self._settings.value("threshold_db")
+        if saved_threshold is not None:
+            val = int(saved_threshold)
+            self.threshold_slider.setValue(val)
+            self.threshold_value_label.setText(f"{val} dB")
+
+        # Hotkey
+        saved_modifiers = self._settings.value("hotkey/modifiers", None)
+        saved_main_key = self._settings.value("hotkey/main_key", None)
+        if saved_main_key is not None:
+            mods = set(saved_modifiers) if saved_modifiers else set()
+            combo = HotkeyCombo(modifiers=mods, main_key=saved_main_key)
+        else:
+            combo = DEFAULT_HOTKEY
+        self._current_combo = combo
+        self.hotkey_label.setText(str(combo))
+
+    def _save_settings(self):
+        """Persist current settings."""
+        self._settings.setValue("language", self.language_combo.currentData())
+        self._settings.setValue("threshold_db", self.threshold_slider.value())
+        if self._current_combo is not None:
+            self._settings.setValue("hotkey/modifiers", list(self._current_combo.modifiers))
+            self._settings.setValue("hotkey/main_key", self._current_combo.main_key)
+
+    # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
 
     def closeEvent(self, event):
+        self._save_settings()
         self._hotkey_listener.stop()
         super().closeEvent(event)
