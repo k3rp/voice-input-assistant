@@ -27,6 +27,7 @@ _PASTE_MODIFIER = Key.cmd if platform.system() == "Darwin" else Key.ctrl
 
 from recorder import AudioRecorder, VolumeMonitor, trim_silence
 from transcriber import transcribe
+from postprocess import postprocess
 from sounds import play_start, play_stop
 from overlay import RecordingBubble, SpinnerBubble
 from ui import MainWindow
@@ -104,15 +105,16 @@ class AppController(QObject):
         # Run trim + transcription in a background thread
         threshold_db = self.window.get_threshold_db()
         language = self.window.get_language_code()
+        prompt = self.window.get_postproc_prompt()
 
         thread = threading.Thread(
             target=self._transcribe_worker,
-            args=(audio, threshold_db, language),
+            args=(audio, threshold_db, language, prompt),
             daemon=True,
         )
         thread.start()
 
-    def _transcribe_worker(self, audio, threshold_db, language):
+    def _transcribe_worker(self, audio, threshold_db, language, prompt):
         """Runs in a background thread."""
         # Trim silence
         trimmed = trim_silence(audio, threshold_db=threshold_db)
@@ -129,10 +131,17 @@ class AppController(QObject):
             language_code=language,
         )
 
-        if text:
-            self.transcription_done.emit(text)
-        else:
+        if not text:
             self.transcription_failed.emit("No transcription returned.")
+            return
+
+        # Post-process via Gemini if a prompt is configured
+        if prompt:
+            print("[Postprocess] Sending to Gemini…")
+            text = postprocess(text, prompt)
+            print(f"[Postprocess] Result: {text}")
+
+        self.transcription_done.emit(text)
 
     # ------------------------------------------------------------------
     # Clipboard-swap auto-paste

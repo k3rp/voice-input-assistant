@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QPlainTextEdit,
     QPushButton,
     QSlider,
     QStatusBar,
@@ -319,6 +320,20 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(volume_group)
 
+        # --- Post transcription editing group ---
+        postproc_group = QGroupBox("Post Transcription Editing")
+        postproc_layout = QVBoxLayout(postproc_group)
+        postproc_layout.addWidget(QLabel(
+            "If non-empty, the transcript is sent to Gemini with this prompt before pasting."
+        ))
+        self.postproc_prompt = QPlainTextEdit()
+        self.postproc_prompt.setPlaceholderText(
+            "e.g.  Fix grammar and punctuation, keep the original meaning."
+        )
+        self.postproc_prompt.setMaximumHeight(80)
+        postproc_layout.addWidget(self.postproc_prompt)
+        layout.addWidget(postproc_group)
+
         # --- Status bar ---
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
@@ -340,6 +355,7 @@ class MainWindow(QMainWindow):
         # --- Auto-save on change ---
         self.language_combo.currentIndexChanged.connect(self._save_settings)
         self.threshold_slider.valueChanged.connect(self._save_settings)
+        self.postproc_prompt.textChanged.connect(self._save_settings)
 
     # ------------------------------------------------------------------
     # Focus: click anywhere outside a text field to clear focus
@@ -361,6 +377,10 @@ class MainWindow(QMainWindow):
 
     def get_threshold_db(self) -> float:
         return float(self.threshold_slider.value())
+
+    def get_postproc_prompt(self) -> str:
+        """Return the post-processing prompt (empty string means disabled)."""
+        return self.postproc_prompt.toPlainText().strip()
 
     # ------------------------------------------------------------------
     # Live volume meter
@@ -490,6 +510,10 @@ class MainWindow(QMainWindow):
             self.threshold_slider.setValue(val)
             self.threshold_value_label.setText(f"{val} dB")
 
+        # Post-processing prompt
+        saved_prompt = self._settings.value("postproc_prompt", "")
+        self.postproc_prompt.setPlainText(saved_prompt or "")
+
         # Hotkey
         saved_modifiers = self._settings.value("hotkey/modifiers", None)
         saved_main_key = self._settings.value("hotkey/main_key", None)
@@ -505,6 +529,7 @@ class MainWindow(QMainWindow):
         """Persist current settings."""
         self._settings.setValue("language", self.language_combo.currentData())
         self._settings.setValue("threshold_db", self.threshold_slider.value())
+        self._settings.setValue("postproc_prompt", self.postproc_prompt.toPlainText())
         if self._current_combo is not None:
             self._settings.setValue("hotkey/modifiers", list(self._current_combo.modifiers))
             self._settings.setValue("hotkey/main_key", self._current_combo.main_key)
