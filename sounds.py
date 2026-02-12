@@ -63,4 +63,3 @@ def play_stop():
         sd.play(_chirp_stop, samplerate=_SAMPLE_RATE)
     except Exception:
         pass
-

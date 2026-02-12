@@ -201,4 +201,3 @@ class SpinnerBubble(_BaseBubble):
         painter.drawArc(rect, start_angle, span_angle)
 
         painter.end()
-

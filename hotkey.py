@@ -162,4 +162,3 @@ class HotkeyListener:
         if key_str == self._combo.main_key and self._main_key_down:
             self._main_key_down = False
             self.signals.hotkey_released.emit()
-

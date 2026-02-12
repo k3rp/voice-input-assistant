@@ -47,7 +47,8 @@ class AppController(QObject):
         super().__init__()
         self.window = window
         self.recorder = AudioRecorder()
-        self._kb = KbController()
+
+        self.__kb = None  # created lazily to avoid Quartz/Qt startup race
 
         # Overlay bubbles
         self._recording_bubble = RecordingBubble()
@@ -67,6 +68,13 @@ class AppController(QObject):
 
         # Connect volume signal to UI meter
         self.volume_update.connect(self.window.update_volume)
+
+    @property
+    def _kb(self):
+        """Lazily create the pynput keyboard controller on first use."""
+        if self.__kb is None:
+            self.__kb = KbController()
+        return self.__kb
 
     def _on_volume_callback(self, rms_db: float):
         """Called from the audio thread — emit a Qt signal to cross threads safely."""
@@ -209,7 +217,7 @@ def main():
     window.show()
     window.set_status_idle()
 
-    sys.exit(app.exec())
+    app.exec()
 
 
 if __name__ == "__main__":

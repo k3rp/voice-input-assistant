@@ -199,4 +199,3 @@ def trim_silence(
     end_sample = min(len(audio), (last_frame + 1) * frame_length + padding_samples)
 
     return audio[start_sample:end_sample]
-
