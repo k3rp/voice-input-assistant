@@ -74,11 +74,6 @@ class AppController(QObject):
 
     @pyqtSlot()
     def on_start_recording(self):
-        api_key = self.window.get_api_key()
-        if not api_key:
-            self.window._set_status("⚠️  No API key set — cannot record")
-            return
-
         play_start()
         self._recording_bubble.show_at_cursor()
         self.window.set_status_recording()
@@ -100,17 +95,16 @@ class AppController(QObject):
 
         # Run trim + transcription in a background thread
         threshold_db = self.window.get_threshold_db()
-        api_key = self.window.get_api_key()
         language = self.window.get_language_code()
 
         thread = threading.Thread(
             target=self._transcribe_worker,
-            args=(audio, threshold_db, api_key, language),
+            args=(audio, threshold_db, language),
             daemon=True,
         )
         thread.start()
 
-    def _transcribe_worker(self, audio, threshold_db, api_key, language):
+    def _transcribe_worker(self, audio, threshold_db, language):
         """Runs in a background thread."""
         # Trim silence
         trimmed = trim_silence(audio, threshold_db=threshold_db)
@@ -124,7 +118,6 @@ class AppController(QObject):
         # Transcribe
         text = transcribe(
             audio=trimmed,
-            api_key=api_key,
             language_code=language,
         )
 
@@ -183,7 +176,30 @@ class AppController(QObject):
         self.window.set_status_idle()
 
 
+_SETUP_BANNER = """\
+╔══════════════════════════════════════════════════════════════════╗
+║  Voice Input — GCP Speech-to-Text v2                           ║
+║                                                                ║
+║  Setup (run once in your terminal):                            ║
+║                                                                ║
+║    1. Install the gcloud CLI                                   ║
+║         https://cloud.google.com/sdk/docs/install              ║
+║                                                                ║
+║    2. Log in with Application Default Credentials              ║
+║         gcloud auth application-default login                  ║
+║                                                                ║
+║    3. Set your default project                                 ║
+║         gcloud config set project YOUR_PROJECT_ID              ║
+║                                                                ║
+║    4. Enable the Speech-to-Text API                            ║
+║         gcloud services enable speech.googleapis.com           ║
+╚══════════════════════════════════════════════════════════════════╝
+"""
+
+
 def main():
+    print(_SETUP_BANNER)
+
     app = QApplication(sys.argv)
     app.setApplicationName("Voice Input")
 

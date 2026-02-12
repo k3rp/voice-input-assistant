@@ -5,8 +5,6 @@ combined volume meter + silence threshold, and status bar.
 
 from __future__ import annotations
 
-import keyring
-
 from PyQt6.QtCore import Qt, QSize, QRect, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen
 from PyQt6.QtWidgets import (
@@ -27,10 +25,6 @@ from PyQt6.QtWidgets import (
 )
 
 from hotkey import HotkeyCombo, HotkeyListener, key_to_str, _MODIFIER_MAP
-
-# Keyring service name for this application
-_KEYRING_SERVICE = "voice_input"
-_KEYRING_API_KEY = "gcp_api_key"
 
 
 # Common language codes for the dropdown: (display_name, description, code)
@@ -199,30 +193,9 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(central)
         layout.setSpacing(12)
 
-        # --- Credentials group ---
-        creds_group = QGroupBox("GCP Credentials")
-        creds_layout = QVBoxLayout(creds_group)
-
-        # API Key
-        api_key_row = QHBoxLayout()
-        api_key_row.addWidget(QLabel("API Key:"))
-        self.api_key_input = QLineEdit()
-        self.api_key_input.setPlaceholderText("Enter your Google Cloud API key")
-        self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
-        api_key_row.addWidget(self.api_key_input)
-        self.api_key_toggle = QPushButton("Show")
-        self.api_key_toggle.setFixedWidth(60)
-        self.api_key_toggle.setCheckable(True)
-        self.api_key_toggle.toggled.connect(self._toggle_api_key_visibility)
-        self.api_key_save = QPushButton("Save")
-        self.api_key_save.setFixedWidth(60)
-        self.api_key_save.clicked.connect(self._save_api_key)
-        btn_group = QHBoxLayout()
-        btn_group.setSpacing(4)
-        btn_group.addWidget(self.api_key_toggle)
-        btn_group.addWidget(self.api_key_save)
-        api_key_row.addLayout(btn_group)
-        creds_layout.addLayout(api_key_row)
+        # --- Settings group ---
+        settings_group = QGroupBox("Settings")
+        settings_layout = QVBoxLayout(settings_group)
 
         # Language (two-line delegate: bold title + grey description)
         lang_row = QHBoxLayout()
@@ -234,12 +207,9 @@ class MainWindow(QMainWindow):
             idx = self.language_combo.count() - 1
             self.language_combo.setItemData(idx, description, Qt.ItemDataRole.UserRole + 1)
         lang_row.addWidget(self.language_combo)
-        creds_layout.addLayout(lang_row)
+        settings_layout.addLayout(lang_row)
 
-        layout.addWidget(creds_group)
-
-        # Load saved API key (if any)
-        self._load_saved_config()
+        layout.addWidget(settings_group)
 
         # --- Hotkey group ---
         hotkey_group = QGroupBox("Hotkey (Push-to-Talk)")
@@ -324,9 +294,6 @@ class MainWindow(QMainWindow):
     # Public accessors
     # ------------------------------------------------------------------
 
-    def get_api_key(self) -> str:
-        return self.api_key_input.text().strip()
-
     def get_language_code(self) -> str:
         return self.language_combo.currentData()
 
@@ -377,43 +344,6 @@ class MainWindow(QMainWindow):
 
     def set_status_transcribing(self):
         self._set_status("⏳  Transcribing…")
-
-    # ------------------------------------------------------------------
-    # API key visibility toggle & persistence
-    # ------------------------------------------------------------------
-
-    @pyqtSlot(bool)
-    def _toggle_api_key_visibility(self, checked: bool):
-        if checked:
-            self.api_key_input.setEchoMode(QLineEdit.EchoMode.Normal)
-            self.api_key_toggle.setText("Hide")
-        else:
-            self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
-            self.api_key_toggle.setText("Show")
-
-    @pyqtSlot()
-    def _save_api_key(self):
-        """Persist the current API key to the OS keychain."""
-        key = self.api_key_input.text().strip()
-        if key:
-            keyring.set_password(_KEYRING_SERVICE, _KEYRING_API_KEY, key)
-            self._set_status("API key saved to keychain")
-        else:
-            # Delete from keychain if the field is empty
-            try:
-                keyring.delete_password(_KEYRING_SERVICE, _KEYRING_API_KEY)
-            except keyring.errors.PasswordDeleteError:
-                pass
-            self._set_status("API key cleared from keychain")
-
-    def _load_saved_config(self):
-        """Restore API key from the OS keychain (if present)."""
-        try:
-            key = keyring.get_password(_KEYRING_SERVICE, _KEYRING_API_KEY)
-        except Exception:
-            key = None
-        if key:
-            self.api_key_input.setText(key)
 
     # ------------------------------------------------------------------
     # Threshold slider
