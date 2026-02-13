@@ -1,5 +1,13 @@
 # Voice Input
 
+<div align="center">
+  <img src="img/demo.gif" width="50%">
+</div>
+
+<div align="center">
+  <img src="img/ui.png" width="50%">
+</div>
+
 A push-to-talk desktop app that records your voice, sends it to **Google Cloud Speech-to-Text**, and automatically pastes the transcription into whatever app has focus. Optionally post-processes the transcript with **Gemini** before pasting.
 
 Supports macOS and Linux (X11 only; Wayland is not supported).
@@ -7,7 +15,7 @@ Supports macOS and Linux (X11 only; Wayland is not supported).
 ## Prerequisites
 
 - **Python 3.10+**
-- **Google Cloud account** with the Speech-to-Text and Vertex AI APIs enabled
+- **Google Cloud account** will a billing account
 - **gcloud CLI** — [Install guide](https://cloud.google.com/sdk/docs/install)
 
 ## GCP Setup
@@ -21,10 +29,10 @@ gcloud auth application-default login
 # 2. Set your default GCP project
 gcloud config set project YOUR_PROJECT_ID
 
-# 3. Enable the Speech-to-Text API
+# 3. Enable the Speech-to-Text API; one-time setup
 gcloud services enable speech.googleapis.com
 
-# 4. Enable the Vertex AI API (for Gemini post-processing)
+# 4. Enable the Vertex AI API (for post-processing); one-time setup
 gcloud services enable aiplatform.googleapis.com
 ```
 
@@ -32,7 +40,7 @@ gcloud services enable aiplatform.googleapis.com
 
 ```bash
 # Clone the repo
-git clone <repo-url>
+git clone https://github.com/yuhao-he/voice-input-assistant.git
 cd voice_input
 
 # Create a virtual environment
@@ -50,12 +58,4 @@ pip install -r requirements.txt
 source venv/bin/activate
 python main.py
 ```
-
-1. The app window will open with a language selector, hotkey config, volume meter, and post-transcription editing prompt.
-2. Hold the hotkey to record.
-3. Release the hotkey — the audio is trimmed, sent to Google Cloud, optionally post-processed by Gemini, and the result is pasted into the currently focused app.
-
-### Post Transcription Editing
-
-Enter a prompt in the "Post Transcription Editing" box. Each transcript is sent to **Gemini** along with your prompt before being pasted. Leave the box empty to disable post-processing.
 
