@@ -41,9 +41,9 @@ class AppController(QObject):
     blocking the UI.
     """
 
-    transcription_done = pyqtSignal(str)   # emitted when result is ready
-    transcription_failed = pyqtSignal(str)  # emitted on error or silence
-    interim_transcript = pyqtSignal(str)    # emitted with live transcript text
+    transcription_done = pyqtSignal(str, int)   # emitted when result is ready (text, seg_id)
+    transcription_failed = pyqtSignal(str, int) # emitted on error or silence (msg, seg_id)
+    interim_transcript = pyqtSignal(str)        # emitted with live transcript text
 
     def __init__(self, window: MainWindow):
         super().__init__()
@@ -55,15 +55,15 @@ class AppController(QObject):
         # Transcript overlay (replaces old recording / spinner bubbles)
         self._transcript_overlay = TranscriptOverlay()
 
-        # Streaming state
-        self._streaming_thread: threading.Thread | None = None
-        self._streaming_result: str | None = None
+        # Streaming state — per-job containers, keyed by segment id
+        # Each entry: {"thread": Thread, "result_box": [str|None]}
+        self._active_job: dict | None = None
 
         # Connect window signals
         self.window.recording_requested.connect(self.on_start_recording)
         self.window.recording_stopped.connect(self.on_stop_recording)
 
-        # Connect result signals back to UI updates
+        # Connect result signals back to UI updates (both carry seg_id as 2nd arg)
         self.transcription_done.connect(self._on_transcription_done)
         self.transcription_failed.connect(self._on_transcription_failed)
 
@@ -84,20 +84,22 @@ class AppController(QObject):
     @pyqtSlot()
     def on_start_recording(self):
         play_start()
-        self._transcript_overlay.set_text("")
+        # show_at_cursor() appends a new active segment (or shows overlay if hidden)
         self._transcript_overlay.show_at_cursor()
         self.window.set_status_recording()
         self.recorder.start()
 
         # Kick off streaming transcription in a background thread.
-        # It reads audio chunks from the recorder's queue in real time.
+        # Each job uses its own result_box so concurrent jobs don't clash.
         language = self.window.get_language_code()
-        self._streaming_thread = threading.Thread(
+        result_box: list[str | None] = [None]
+        thread = threading.Thread(
             target=self._streaming_worker,
-            args=(self.recorder.audio_queue, language),
+            args=(self.recorder.audio_queue, language, result_box),
             daemon=True,
         )
-        self._streaming_thread.start()
+        self._active_job = {"thread": thread, "result_box": result_box}
+        thread.start()
 
     @pyqtSlot()
     def on_stop_recording(self):
@@ -107,46 +109,56 @@ class AppController(QObject):
 
         play_stop()
 
-        # The streaming thread is still running (draining final
-        # responses).  Keep the overlay visible while we wait.
+        # Freeze the current active segment: it turns semi-white with a
+        # spinner while Gemini post-processes it.
+        seg_id = self._transcript_overlay.freeze_active_segment()
+
+        # Capture the current job's thread and result_box before a new
+        # recording could overwrite self._active_job.
+        job = self._active_job
+        thread_ref = job["thread"] if job else None
+        result_box = job["result_box"] if job else [None]
+
         self.window.set_status_transcribing()
 
-        # Wait for the streaming thread to finish in a background thread
-        # so we don't block the Qt event loop.
+        # Wait for the streaming thread to finish, then post-process.
         prompt = self.window.get_postproc_prompt()
         threading.Thread(
             target=self._wait_for_streaming,
-            args=(prompt,),
+            args=(thread_ref, result_box, prompt, seg_id),
             daemon=True,
         ).start()
 
-    def _streaming_worker(self, audio_queue, language):
+    def _streaming_worker(self, audio_queue, language, result_box: list):
         """
         Runs in a background thread.  Streams audio to the API and
-        collects the final transcript.
+        stores the final transcript in *result_box[0]*.
         """
-        self._streaming_result = None
-
         text = transcribe_streaming(
             audio_queue=audio_queue,
             language_code=language,
             on_interim=self._on_interim_callback,
         )
+        result_box[0] = text
 
-        self._streaming_result = text
-
-    def _wait_for_streaming(self, prompt):
+    def _wait_for_streaming(
+        self,
+        thread: threading.Thread | None,
+        result_box: list,
+        prompt: str,
+        seg_id: int,
+    ):
         """
-        Runs in a background thread.  Waits for the streaming thread
-        to finish, applies post-processing, and emits the result.
+        Runs in a background thread.  Waits for *thread* to finish,
+        applies post-processing, and emits the result paired with *seg_id*.
         """
-        if self._streaming_thread is not None:
-            self._streaming_thread.join()
+        if thread is not None:
+            thread.join()
 
-        text = self._streaming_result
+        text = result_box[0]
 
         if not text:
-            self.transcription_failed.emit("No transcription returned.")
+            self.transcription_failed.emit("No transcription returned.", seg_id)
             return
 
         # Post-process via Gemini if a prompt is configured
@@ -155,18 +167,18 @@ class AppController(QObject):
             text = postprocess(text, prompt)
             print(f"[Postprocess] Result: {text}")
 
-        self.transcription_done.emit(text)
+        self.transcription_done.emit(text, seg_id)
 
     # ------------------------------------------------------------------
     # Clipboard-swap auto-paste
     # ------------------------------------------------------------------
 
-    @pyqtSlot(str)
-    def _on_transcription_done(self, text: str):
+    @pyqtSlot(str, int)
+    def _on_transcription_done(self, text: str, seg_id: int):
         print(f"\n>>> {text}\n")
 
-        # Dismiss the transcript overlay
-        self._transcript_overlay.dismiss()
+        # Remove this segment from the overlay; auto-hides if nothing remains.
+        self._transcript_overlay.complete_segment(seg_id)
 
         clipboard = QApplication.clipboard()
 
@@ -198,13 +210,16 @@ class AppController(QObject):
 
         QTimer.singleShot(350, _restore)
 
-        self.window.set_status_idle()
+        # Only return to idle once the overlay has nothing left to show
+        if not self._transcript_overlay.isVisible():
+            self.window.set_status_idle()
 
-    @pyqtSlot(str)
-    def _on_transcription_failed(self, msg: str):
+    @pyqtSlot(str, int)
+    def _on_transcription_failed(self, msg: str, seg_id: int):
         print(f"[Info] {msg}")
-        self._transcript_overlay.dismiss()
-        self.window.set_status_idle()
+        self._transcript_overlay.complete_segment(seg_id)
+        if not self._transcript_overlay.isVisible():
+            self.window.set_status_idle()
 
 
 _SETUP_BANNER = """\
