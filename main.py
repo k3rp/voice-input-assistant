@@ -14,6 +14,7 @@ via a clipboard-swap technique (save → set → paste keystroke → restore).
 
 from __future__ import annotations
 
+import os
 import platform
 import sys
 import threading
@@ -25,6 +26,15 @@ from pynput.keyboard import Controller as KbController, Key
 
 # Determine the correct modifier for paste (Cmd on macOS, Ctrl elsewhere)
 _PASTE_MODIFIER = Key.cmd if platform.system() == "Darwin" else Key.ctrl
+_IS_MACOS = platform.system() == "Darwin"
+
+_ns_workspace = None
+if _IS_MACOS:
+    try:
+        from AppKit import NSWorkspace as _NSWorkspace
+        _ns_workspace = _NSWorkspace.sharedWorkspace
+    except ImportError:
+        pass
 
 from recorder import AudioRecorder
 from transcriber import transcribe_streaming
@@ -41,8 +51,8 @@ class AppController(QObject):
     blocking the UI.
     """
 
-    transcription_done = pyqtSignal(str, int)   # emitted when result is ready (text, seg_id)
-    transcription_failed = pyqtSignal(str, int) # emitted on error or silence (msg, seg_id)
+    transcription_done = pyqtSignal(str, int, int)   # (text, seg_id, generation)
+    transcription_failed = pyqtSignal(str, int, int) # (msg, seg_id, generation)
     interim_transcript = pyqtSignal(str)        # emitted with live transcript text
 
     def __init__(self, window: MainWindow):
@@ -58,10 +68,16 @@ class AppController(QObject):
         # Streaming state — per-job containers, keyed by segment id
         # Each entry: {"thread": Thread, "result_box": [str|None]}
         self._active_job: dict | None = None
+        self._is_recording = False
+        self._generation = 0
+        self._generation_lock = threading.Lock()
+        self._pending_timers: list[QTimer] = []
+        self._last_external_app = None
 
         # Connect window signals
         self.window.recording_requested.connect(self.on_start_recording)
         self.window.recording_stopped.connect(self.on_stop_recording)
+        self.window.cancel_requested.connect(self.on_cancel_all)
 
         # Connect result signals back to UI updates (both carry seg_id as 2nd arg)
         self.transcription_done.connect(self._on_transcription_done)
@@ -69,6 +85,13 @@ class AppController(QObject):
 
         # Live transcript updates → overlay
         self.interim_transcript.connect(self._transcript_overlay.set_text)
+
+        # Keep a best-effort pointer to the last non-self foreground app so
+        # pressing hotkey while this window is focused can hand focus back.
+        self._focus_probe_timer = QTimer(self)
+        self._focus_probe_timer.setInterval(250)
+        self._focus_probe_timer.timeout.connect(self._capture_frontmost_external_app)
+        self._focus_probe_timer.start()
 
     @property
     def _kb(self):
@@ -81,13 +104,92 @@ class AppController(QObject):
         """Called from the streaming thread — emit a Qt signal to cross threads safely."""
         self.interim_transcript.emit(text)
 
+    def _capture_frontmost_external_app(self):
+        if _ns_workspace is None:
+            return
+        try:
+            app = _ns_workspace().frontmostApplication()
+            if app is not None and app.processIdentifier() != os.getpid():
+                self._last_external_app = app
+        except Exception:
+            pass
+
+    def _release_focus_to_input_app(self) -> bool:
+        """Try to hand focus to a non-VoiceInput app. Returns True on success."""
+        focused = QApplication.focusWidget()
+        if focused is not None:
+            focused.clearFocus()
+        self.window.clearFocus()
+
+        if _ns_workspace is None:
+            return False
+        try:
+            front = _ns_workspace().frontmostApplication()
+            if front is not None and front.processIdentifier() != os.getpid():
+                return True
+            # If Voice Input is frontmost, jump back to the last external app.
+            if (
+                front is not None
+                and front.processIdentifier() == os.getpid()
+                and self._last_external_app is not None
+            ):
+                self._last_external_app.activateWithOptions_(0)
+                return True
+        except Exception:
+            return False
+        return False
+
+    def _current_generation(self) -> int:
+        with self._generation_lock:
+            return self._generation
+
+    def _bump_generation(self) -> int:
+        with self._generation_lock:
+            self._generation += 1
+            return self._generation
+
+    def _schedule_timer(self, delay_ms: int, callback):
+        """Track UI timers so Escape can cancel pending paste/restore actions."""
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+
+        def _run():
+            if timer in self._pending_timers:
+                self._pending_timers.remove(timer)
+            callback()
+            timer.deleteLater()
+
+        timer.timeout.connect(_run)
+        self._pending_timers.append(timer)
+        timer.start(delay_ms)
+
+    def _cancel_pending_timers(self):
+        for timer in self._pending_timers:
+            timer.stop()
+            timer.deleteLater()
+        self._pending_timers.clear()
+
     @pyqtSlot()
     def on_start_recording(self):
+        if self._is_recording:
+            return
+
+        # First pass: immediately release focus from our window.
+        handoff_ok = self._release_focus_to_input_app()
+        if not handoff_ok and self.window.isActiveWindow():
+            # Deterministic fallback: minimize our window so it cannot pop back.
+            self.window.showMinimized()
+
         play_start()
         # show_at_cursor() appends a new active segment (or shows overlay if hidden)
         self._transcript_overlay.show_at_cursor()
+        # Second pass: macOS can re-activate our app shortly after showing tool
+        # windows; run delayed handoff passes to keep focus on the target app.
+        QTimer.singleShot(0, self._release_focus_to_input_app)
+        QTimer.singleShot(900, self._release_focus_to_input_app)
         self.window.set_status_recording()
         self.recorder.start()
+        self._is_recording = True
 
         # Kick off streaming transcription in a background thread.
         # Each job uses its own result_box so concurrent jobs don't clash.
@@ -103,6 +205,10 @@ class AppController(QObject):
 
     @pyqtSlot()
     def on_stop_recording(self):
+        if not self._is_recording:
+            return
+        self._is_recording = False
+
         # Stopping the recorder pushes a None sentinel into the audio
         # queue, which causes the streaming generator to end gracefully.
         self.recorder.stop()
@@ -123,11 +229,30 @@ class AppController(QObject):
 
         # Wait for the streaming thread to finish, then post-process.
         prompt = self.window.get_postproc_prompt()
+        generation = self._current_generation()
         threading.Thread(
             target=self._wait_for_streaming,
-            args=(thread_ref, result_box, prompt, seg_id),
+            args=(thread_ref, result_box, prompt, seg_id, generation),
             daemon=True,
         ).start()
+
+    @pyqtSlot()
+    def on_cancel_all(self):
+        # Invalidate every in-flight transcription/postprocess request.
+        self._bump_generation()
+        self._is_recording = False
+        self._active_job = None
+
+        # Stop audio input immediately (safe to call if already stopped).
+        self.recorder.stop()
+
+        # Remove all transcript UI state immediately.
+        self._transcript_overlay.dismiss()
+
+        # Prevent pending paste/restore callbacks from firing.
+        self._cancel_pending_timers()
+
+        self.window.set_status_idle()
 
     def _streaming_worker(self, audio_queue, language, result_box: list):
         """
@@ -147,6 +272,7 @@ class AppController(QObject):
         result_box: list,
         prompt: str,
         seg_id: int,
+        generation: int,
     ):
         """
         Runs in a background thread.  Waits for *thread* to finish,
@@ -155,10 +281,13 @@ class AppController(QObject):
         if thread is not None:
             thread.join()
 
+        if generation != self._current_generation():
+            return
+
         text = result_box[0]
 
         if not text:
-            self.transcription_failed.emit("No transcription returned.", seg_id)
+            self.transcription_failed.emit("No transcription returned.", seg_id, generation)
             return
 
         # Post-process via Gemini if a prompt is configured
@@ -167,14 +296,20 @@ class AppController(QObject):
             text = postprocess(text, prompt)
             print(f"[Postprocess] Result: {text}")
 
-        self.transcription_done.emit(text, seg_id)
+        if generation != self._current_generation():
+            return
+
+        self.transcription_done.emit(text, seg_id, generation)
 
     # ------------------------------------------------------------------
     # Clipboard-swap auto-paste
     # ------------------------------------------------------------------
 
-    @pyqtSlot(str, int)
-    def _on_transcription_done(self, text: str, seg_id: int):
+    @pyqtSlot(str, int, int)
+    def _on_transcription_done(self, text: str, seg_id: int, generation: int):
+        if generation != self._current_generation():
+            return
+
         print(f"\n>>> {text}\n")
 
         # Remove this segment from the overlay; auto-hides if nothing remains.
@@ -197,25 +332,32 @@ class AppController(QObject):
         #    (Using time.sleep here would block the event loop and
         #    prevent Qt from serving clipboard data to the target app.)
         def _do_paste():
+            if generation != self._current_generation():
+                return
             self._kb.press(_PASTE_MODIFIER)
             self._kb.press("v")
             self._kb.release("v")
             self._kb.release(_PASTE_MODIFIER)
 
-        QTimer.singleShot(80, _do_paste)
+        self._schedule_timer(80, _do_paste)
 
         # 4. Restore original clipboard after paste has had time to complete
         def _restore():
+            if generation != self._current_generation():
+                return
             clipboard.setMimeData(saved_mime)
 
-        QTimer.singleShot(350, _restore)
+        self._schedule_timer(350, _restore)
 
         # Only return to idle once the overlay has nothing left to show
         if not self._transcript_overlay.isVisible():
             self.window.set_status_idle()
 
-    @pyqtSlot(str, int)
-    def _on_transcription_failed(self, msg: str, seg_id: int):
+    @pyqtSlot(str, int, int)
+    def _on_transcription_failed(self, msg: str, seg_id: int, generation: int):
+        if generation != self._current_generation():
+            return
+
         print(f"[Info] {msg}")
         self._transcript_overlay.complete_segment(seg_id)
         if not self._transcript_overlay.isVisible():

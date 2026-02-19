@@ -5,7 +5,7 @@ post-transcription editing, and status bar.
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QSize, QRect, QSettings, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import Qt, QSize, QRect, QSettings, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen
 from PyQt6.QtWidgets import (
     QApplication,
@@ -123,6 +123,7 @@ class MainWindow(QMainWindow):
     # Signals emitted to the controller
     recording_requested = pyqtSignal()    # hotkey pressed
     recording_stopped = pyqtSignal()      # hotkey released
+    cancel_requested = pyqtSignal()       # escape pressed
 
     def __init__(self):
         super().__init__()
@@ -217,6 +218,7 @@ class MainWindow(QMainWindow):
             "If non-empty, the transcript is sent to Gemini with this prompt before pasting."
         ))
         self.postproc_prompt = QPlainTextEdit()
+        self.postproc_prompt.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.postproc_prompt.setPlaceholderText(
             "e.g.  Fix grammar and punctuation, keep the original meaning."
         )
@@ -232,6 +234,7 @@ class MainWindow(QMainWindow):
         # --- Connect hotkey listener signals ---
         self._hotkey_listener.signals.hotkey_pressed.connect(self._on_hotkey_pressed)
         self._hotkey_listener.signals.hotkey_released.connect(self._on_hotkey_released)
+        self._hotkey_listener.signals.cancel_requested.connect(self._on_cancel_requested)
         self._hotkey_listener.signals.key_event.connect(self._on_capture_key_event)
 
         # --- Restore saved settings (or fall back to defaults) ---
@@ -245,6 +248,9 @@ class MainWindow(QMainWindow):
         # --- Auto-save on change ---
         self.language_combo.currentIndexChanged.connect(self._save_settings)
         self.postproc_prompt.textChanged.connect(self._save_settings)
+
+        # Start with no editor focus so typing doesn't land in the prompt box.
+        QTimer.singleShot(0, self._clear_initial_focus)
 
     # ------------------------------------------------------------------
     # Focus: click anywhere outside a text field to clear focus
@@ -337,6 +343,15 @@ class MainWindow(QMainWindow):
     @pyqtSlot()
     def _on_hotkey_released(self):
         self.recording_stopped.emit()
+
+    @pyqtSlot()
+    def _on_cancel_requested(self):
+        self.cancel_requested.emit()
+
+    def _clear_initial_focus(self):
+        focused = QApplication.focusWidget()
+        if focused is not None:
+            focused.clearFocus()
 
     # ------------------------------------------------------------------
     # Settings persistence (QSettings — macOS plist / Windows registry)

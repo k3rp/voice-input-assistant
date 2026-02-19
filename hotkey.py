@@ -68,6 +68,7 @@ class HotkeySignals(QObject):
     """Qt signals emitted by the hotkey listener."""
     hotkey_pressed = pyqtSignal()
     hotkey_released = pyqtSignal()
+    cancel_requested = pyqtSignal()  # Escape pressed: cancel all in-flight work
     key_event = pyqtSignal(object, bool)  # (key, is_press) — used for hotkey capture mode
 
 
@@ -121,6 +122,11 @@ class HotkeyListener:
     # ------------------------------------------------------------------
 
     def _on_press(self, key):
+        # Escape always means "cancel everything now", even outside capture mode.
+        if key == Key.esc:
+            self.signals.cancel_requested.emit()
+            return
+
         # In capture mode, forward every key press to the UI
         if self._capture_mode:
             self.signals.key_event.emit(key, True)
