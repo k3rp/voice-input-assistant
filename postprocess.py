@@ -14,7 +14,7 @@ from typing import Optional
 
 from google import genai
 
-_MODEL = "gemini-2.0-flash"
+_MODEL = "gemini-2.5-flash"
 
 # Lazy-initialised client — recreated whenever configure() is called.
 _client: Optional[genai.Client] = None

@@ -398,21 +398,22 @@ class AppController(QObject):
 
 _SETUP_BANNER = """\
 ╔══════════════════════════════════════════════════════════════════╗
-║  Voice Input — GCP Speech-to-Text v2                           ║
-║                                                                ║
-║  Setup (run once in your terminal):                            ║
-║                                                                ║
-║    1. Install the gcloud CLI                                   ║
-║         https://cloud.google.com/sdk/docs/install              ║
-║                                                                ║
-║    2. Log in with Application Default Credentials              ║
-║         gcloud auth application-default login                  ║
-║                                                                ║
-║    3. Set your default project                                 ║
-║         gcloud config set project YOUR_PROJECT_ID              ║
-║                                                                ║
-║    4. Enable the Speech-to-Text API                            ║
-║         gcloud services enable speech.googleapis.com           ║
+║  Speedh Input                                                    ║
+║                                                                  ║
+║  First-time setup (one-time, no gcloud CLI required):            ║
+║                                                                  ║
+║    1. Go to console.cloud.google.com                             ║
+║                                                                  ║
+║    2. Select or create a project with billing enabled            ║
+║                                                                  ║
+║    3. Create an API key (APIs & Services → Credentials)          ║
+║                                                                  ║
+║    4. Restrict the key to required APIs (Library):               ║
+║         • Cloud Speech-to-Text API                               ║
+║         • Generative Language API  (for Gemini post-proc)        ║
+║                                                                  ║
+║    5. Click the 🎙 menu-bar icon → Show / Hide Settings          ║
+║       and paste your key into "Google Cloud API Key"             ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 
@@ -421,8 +422,8 @@ def main():
     print(_SETUP_BANNER)
 
     app = QApplication(sys.argv)
-    app.setOrganizationName("VoiceInput")
-    app.setApplicationName("Voice Input")
+    app.setOrganizationName("SpeechIput")
+    app.setApplicationName("Speech Input")
     # Keep the app alive when the main window is hidden (tray-only mode).
     app.setQuitOnLastWindowClosed(False)
 

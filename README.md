@@ -4,37 +4,25 @@
   <img src="img/demo.gif" width="50%">
 </div>
 
-<div align="center">
-  <img src="img/ui.png" width="50%">
-</div>
-
-A push-to-talk desktop app that records your voice, sends it to **Google Cloud Speech-to-Text**, and automatically pastes the transcription into whatever app has focus. Optionally post-processes the transcript with **Gemini** before pasting.
+A push-to-talk desktop app that transcribes your speech. Optionally post-processes the transcript with **Gemini**.
 
 Supports macOS and Linux (X11 only; Wayland is not supported).
 
 ## Prerequisites
 
 - **Python 3.10+**
-- **Google Cloud account** will a billing account
-- **gcloud CLI** — [Install guide](https://cloud.google.com/sdk/docs/install)
+- **Google Cloud account** with a billing-enabled project
+- A **Google Cloud API key**
 
-## GCP Setup
+## API Key Setup
 
-Run these commands once in your terminal:
-
-```bash
-# 1. Authenticate with Application Default Credentials
-gcloud auth application-default login
-
-# 2. Set your default GCP project
-gcloud config set project YOUR_PROJECT_ID
-
-# 3. Enable the Speech-to-Text API; one-time setup
-gcloud services enable speech.googleapis.com
-
-# 4. Enable the Vertex AI API (for post-processing); one-time setup
-gcloud services enable aiplatform.googleapis.com
-```
+1. Go to [console.cloud.google.com](https://console.cloud.google.com)
+2. Select or create a project with billing enabled
+3. Create an API key (**APIs & Services → Credentials → Create Credentials → API key**)
+4. Restrict the API key to required APIs (**APIs & Services → Library**):
+   - **Cloud Speech-to-Text API**
+   - **Generative Language API** *(for Gemini post-processing)*
+5. Launch the app, click the 🎙 icon in the menu bar → **Show / Hide Settings**, and paste the key into the **Google Cloud API Key** field
 
 ## Installation
 

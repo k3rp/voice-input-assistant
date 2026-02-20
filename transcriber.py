@@ -1,12 +1,10 @@
 """
-GCP Speech-to-Text **v1** caller.
+GCP Speech-to-Text **v1** streaming caller.
 
-Authentication uses a Google Cloud API key — no gcloud CLI or Application
-Default Credentials required.  Call ``configure(api_key)`` once before use.
+Authentication uses a Google Cloud API key — no gcloud CLI, Application
+Default Credentials, or GCP project ID required.
 
-Speech-to-Text v1 is used (instead of v2) because it does not require a
-GCP project ID in the recognizer path, which keeps the setup to a single
-copy-paste API key.
+Call ``configure(api_key)`` once (or whenever the key changes) before use.
 """
 
 from __future__ import annotations
