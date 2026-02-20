@@ -317,15 +317,12 @@ class MainWindow(QMainWindow):
         self._boost_words: list[str] = []
 
         # --- Post transcription editing group ---
-        postproc_group = QGroupBox("Post Transcription Editing")
+        postproc_group = QGroupBox("AI Post Transcription Editing")
         postproc_layout = QVBoxLayout(postproc_group)
-        postproc_layout.addWidget(QLabel(
-            "If non-empty, the transcript is sent to Gemini with this prompt before pasting."
-        ))
         self.postproc_prompt = QPlainTextEdit()
         self.postproc_prompt.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.postproc_prompt.setPlaceholderText(
-            "e.g.  Fix grammar and punctuation, keep the original meaning."
+            "e.g.  Fix grammar and repetition, and keep the original words as much as possible."
         )
         self.postproc_prompt.setMaximumHeight(80)
         postproc_layout.addWidget(self.postproc_prompt)
@@ -339,7 +336,7 @@ class MainWindow(QMainWindow):
         # --- Connect hotkey listener signals ---
         self._hotkey_listener.signals.hotkey_pressed.connect(self._on_hotkey_pressed)
         self._hotkey_listener.signals.hotkey_released.connect(self._on_hotkey_released)
-        self._hotkey_listener.signals.hotkey_double_pressed.connect(self.show_window)
+        self._hotkey_listener.signals.toggle_settings_requested.connect(self._toggle_window)
         self._hotkey_listener.signals.cancel_requested.connect(self._on_cancel_requested)
         self._hotkey_listener.signals.key_event.connect(self._on_capture_key_event)
 

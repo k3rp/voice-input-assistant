@@ -411,10 +411,7 @@ _SETUP_BANNER = """\
 ║                                                                  ║
 ║    4. Restrict the key to required APIs (Library):               ║
 ║         • Cloud Speech-to-Text API                               ║
-║         • Generative Language API  (for Gemini post-proc)        ║
-║                                                                  ║
-║    5. Click the 🎙 menu-bar icon → Show / Hide Settings          ║
-║       and paste your key into "Google Cloud API Key"             ║
+║         • Generative Language API                                ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 

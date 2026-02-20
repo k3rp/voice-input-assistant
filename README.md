@@ -34,7 +34,6 @@ cd voice_input
 # Create a virtual environment
 python3 -m venv venv
 source venv/bin/activate   # macOS / Linux
-# venv\Scripts\activate    # Windows
 
 # Install dependencies
 pip install -r requirements.txt
@@ -46,4 +45,8 @@ pip install -r requirements.txt
 source venv/bin/activate
 python main.py
 ```
+
+Press **`Ctrl` + `Shift` + `Alt` + `Q`** anywhere to show or hide the settings menu.
+
+You can also find the settings menu in the menu bar (🎙 icon) on macOS.
 

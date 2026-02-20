@@ -9,7 +9,6 @@ a signal to stop recording.
 from __future__ import annotations
 
 import threading
-import time
 from typing import Optional, Set, Callable
 
 from pynput import keyboard
@@ -69,7 +68,7 @@ class HotkeySignals(QObject):
     """Qt signals emitted by the hotkey listener."""
     hotkey_pressed = pyqtSignal()
     hotkey_released = pyqtSignal()
-    hotkey_double_pressed = pyqtSignal()
+    toggle_settings_requested = pyqtSignal()
     cancel_requested = pyqtSignal()  # Escape pressed: cancel all in-flight work
     key_event = pyqtSignal(object, bool)  # (key, is_press) — used for hotkey capture mode
 
@@ -88,7 +87,6 @@ class HotkeyListener:
         self._main_key_down: bool = False
         self._listener: Optional[keyboard.Listener] = None
         self._capture_mode: bool = False  # When True, next key press sets the hotkey
-        self._last_press_time: float = 0.0
 
     # ------------------------------------------------------------------
     # Public API
@@ -139,24 +137,22 @@ class HotkeyListener:
             self._active_modifiers.add(_MODIFIER_MAP[key])
             return
 
+        key_str = key_to_str(key)
+        
+        if key_str == "q" and self._active_modifiers == {"ctrl", "shift", "alt"}:
+            self.signals.toggle_settings_requested.emit()
+            return
+
         if self._combo is None or not self._combo.is_valid():
             return
 
-        key_str = key_to_str(key)
         if (
             key_str == self._combo.main_key
             and self._active_modifiers == self._combo.modifiers
             and not self._main_key_down
         ):
             self._main_key_down = True
-            
-            now = time.time()
-            if now - self._last_press_time < 0.4:  # 400ms double-tap window
-                self.signals.hotkey_double_pressed.emit()
-            else:
-                self.signals.hotkey_pressed.emit()
-            
-            self._last_press_time = now
+            self.signals.hotkey_pressed.emit()
 
     def _on_release(self, key):
         if self._capture_mode:
