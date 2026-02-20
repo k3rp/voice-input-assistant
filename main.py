@@ -400,11 +400,23 @@ def main():
     app = QApplication(sys.argv)
     app.setOrganizationName("VoiceInput")
     app.setApplicationName("Voice Input")
+    # Keep the app alive when the main window is hidden (tray-only mode).
+    app.setQuitOnLastWindowClosed(False)
+
+    # ── macOS: run as a pure menu-bar agent (no Dock icon, no app-switcher entry) ──
+    if _IS_MACOS:
+        try:
+            from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
+            NSApplication.sharedApplication().setActivationPolicy_(
+                NSApplicationActivationPolicyAccessory
+            )
+        except ImportError:
+            pass
 
     window = MainWindow()
     controller = AppController(window)  # noqa: F841 — prevent GC
 
-    window.show()
+    # Do NOT show the main window on startup — the tray icon is the entry point.
     window.set_status_idle()
 
     app.exec()

@@ -5,8 +5,10 @@ post-transcription editing, and status bar.
 
 from __future__ import annotations
 
+import platform
+
 from PyQt6.QtCore import Qt, QSize, QRect, QSettings, QTimer, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QColor, QFont, QPainter, QPen
+from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -16,16 +18,57 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QPlainTextEdit,
     QPushButton,
     QStatusBar,
     QStyledItemDelegate,
     QStyleOptionViewItem,
+    QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
 )
 
 from hotkey import HotkeyCombo, HotkeyListener, key_to_str, _MODIFIER_MAP
+
+
+# ── macOS native status-bar support (AppKit / PyObjC) ─────────────────────────
+# We bypass QSystemTrayIcon on macOS because it has a known timing issue with
+# NSApplicationActivationPolicyAccessory that prevents the icon from appearing.
+# AppKit (pyobjc-framework-Cocoa) is already a dependency of this project.
+_APPKIT_AVAILABLE = False
+try:
+    import objc as _objc
+    from AppKit import (
+        NSObject as _NSObject,
+        NSStatusBar as _NSStatusBar,
+        NSVariableStatusItemLength as _NSVariableStatusItemLength,
+        NSMenu as _NSMenu,
+        NSMenuItem as _NSMenuItem,
+    )
+
+    class _MacOSMenuTarget(_NSObject):
+        """Objective-C action target that forwards menu clicks to the Python window."""
+
+        def init(self):
+            self = _objc.super(_MacOSMenuTarget, self).init()
+            if self is None:
+                return None
+            self._vi_window = None
+            return self
+
+        def toggleWindow_(self, sender):   # noqa: N802
+            if self._vi_window is not None:
+                self._vi_window._toggle_window()
+
+        def quitApp_(self, sender):        # noqa: N802
+            if self._vi_window is not None:
+                self._vi_window._quit_app()
+
+    _APPKIT_AVAILABLE = True
+except Exception:
+    pass
+# ──────────────────────────────────────────────────────────────────────────────
 
 
 # Common language codes for the dropdown: (display_name, description, code)
@@ -289,6 +332,172 @@ class MainWindow(QMainWindow):
         # Start with no editor focus so typing doesn't land in the prompt box.
         QTimer.singleShot(0, self._clear_initial_focus)
 
+        # System tray / menu-bar icon — keeps the app alive when the window is hidden.
+        self._tray_notified = False
+        self._tray_icon: QSystemTrayIcon | None = None   # used on Linux
+        self._macos_status_item = None                   # used on macOS
+        self._macos_menu_delegate = None                 # strong ref to ObjC delegate
+        if platform.system() == "Darwin" and _APPKIT_AVAILABLE:
+            self._setup_macos_native_tray()
+        else:
+            self._tray_icon = self._setup_tray_icon()
+
+    # ------------------------------------------------------------------
+    # System tray
+    # ------------------------------------------------------------------
+
+    def _make_mic_icon(self) -> QIcon:
+        """Draw a simple microphone icon programmatically (no image file needed)."""
+        size = 64
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        color = QColor(220, 220, 220)  # light grey — legible on both dark and light trays
+        pen = QPen(color)
+        pen.setWidth(3)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(color)
+
+        cx = size // 2  # 32
+
+        # ── Capsule (rounded rect) ────────────────────────────────────
+        cap_w, cap_h, cap_r = 16, 24, 8
+        painter.drawRoundedRect(cx - cap_w // 2, 6, cap_w, cap_h, cap_r, cap_r)
+
+        # ── Stand arc — U-shape embracing the bottom of the capsule ──
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        stand_r = 14
+        arc_cy = 6 + cap_h  # y-centre of the arc = bottom edge of capsule = 30
+        # Arc rect centred at (cx, arc_cy)
+        painter.drawArc(
+            cx - stand_r, arc_cy - stand_r,
+            2 * stand_r, 2 * stand_r,
+            0,           # start at 3-o'clock (right side)
+            -180 * 16,   # clockwise 180° → left side, passing through the bottom
+        )
+
+        # ── Stem ──────────────────────────────────────────────────────
+        stem_top = arc_cy + stand_r  # bottom of the arc circle
+        stem_bot = 54
+        painter.drawLine(cx, stem_top, cx, stem_bot)
+
+        # ── Base ──────────────────────────────────────────────────────
+        painter.drawLine(cx - 10, stem_bot, cx + 10, stem_bot)
+
+        painter.end()
+        return QIcon(pixmap)
+
+    def _setup_tray_icon(self) -> QSystemTrayIcon:
+        """Create and return a QSystemTrayIcon (used on Linux / Windows)."""
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            print("[Tray] System tray not available on this desktop environment.")
+
+        tray = QSystemTrayIcon(self._make_mic_icon(), parent=self)
+        tray.setToolTip("Voice Input — GCP Speech-to-Text")
+
+        menu = QMenu()
+        show_action = menu.addAction("Show / Hide Settings")
+        show_action.triggered.connect(self._toggle_window)
+        menu.addSeparator()
+        quit_action = menu.addAction("Quit Voice Input")
+        quit_action.triggered.connect(self._quit_app)
+
+        tray.setContextMenu(menu)
+        tray.activated.connect(self._on_tray_activated)
+        tray.show()
+        return tray
+
+    def _setup_macos_native_tray(self):
+        """Create a native NSStatusItem in the macOS menu bar.
+
+        QSystemTrayIcon has a timing issue with NSApplicationActivationPolicyAccessory
+        that prevents the Qt-managed NSStatusItem from appearing reliably.  Using
+        AppKit directly sidesteps that entirely.
+        """
+        status_bar = _NSStatusBar.systemStatusBar()
+        status_item = status_bar.statusItemWithLength_(_NSVariableStatusItemLength)
+
+        # Use the mic SF-symbol-style emoji as the button title.
+        # (Setting an NSImage from the Qt pixmap is possible but adds complexity.)
+        status_item.button().setTitle_("🎙")
+        status_item.button().setToolTip_("Voice Input — GCP Speech-to-Text")
+
+        # Build the drop-down menu.
+        menu = _NSMenu.new()
+
+        delegate = _MacOSMenuTarget.alloc().init()
+        delegate._vi_window = self
+        self._macos_menu_delegate = delegate  # keep a strong Python reference
+
+        show_item = _NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Show / Hide Settings", "toggleWindow:", ""
+        )
+        show_item.setTarget_(delegate)
+        menu.addItem_(show_item)
+
+        menu.addItem_(_NSMenuItem.separatorItem())
+
+        quit_item = _NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Quit Voice Input", "quitApp:", ""
+        )
+        quit_item.setTarget_(delegate)
+        menu.addItem_(quit_item)
+
+        status_item.setMenu_(menu)
+        self._macos_status_item = status_item
+        self._macos_status_bar = status_bar   # keep reference so bar isn't GC'd
+
+    def _toggle_window(self):
+        """Show the main window if hidden; hide it if visible."""
+        if self.isVisible():
+            self.hide()
+        else:
+            # On macOS the process may be an Accessory agent (no Dock icon) and
+            # won't be considered the "active" app by the window server.  We must
+            # explicitly activate it so the window actually lands in the foreground.
+            if platform.system() == "Darwin":
+                try:
+                    from AppKit import NSApplication
+                    NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+                except ImportError:
+                    pass
+            self.show()
+            self.raise_()
+            self.activateWindow()
+
+    @pyqtSlot(QSystemTrayIcon.ActivationReason)
+    def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason):
+        """Toggle window visibility when the tray icon is clicked.
+
+        On macOS, clicking the menu-bar icon always produces a ``Context``
+        activation (the context menu pops up); ``Trigger`` is used on
+        Windows/Linux for a plain left-click.  We handle both so the icon
+        is tappable on every platform, while still letting the context menu
+        appear normally.
+        """
+        if reason in (
+            QSystemTrayIcon.ActivationReason.Trigger,
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+        ):
+            self._toggle_window()
+
+    def _quit_app(self):
+        """Save settings, stop the hotkey listener, and exit cleanly."""
+        self._save_settings()
+        self._hotkey_listener.stop()
+        # Remove the native macOS status item so it disappears immediately on exit.
+        if self._macos_status_item is not None:
+            try:
+                _NSStatusBar.systemStatusBar().removeStatusItem_(self._macos_status_item)
+            except Exception:
+                pass
+        QApplication.instance().quit()
+
     # ------------------------------------------------------------------
     # Focus: click anywhere outside a text field to clear focus
     # ------------------------------------------------------------------
@@ -475,6 +684,24 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def closeEvent(self, event):
-        self._save_settings()
-        self._hotkey_listener.stop()
-        super().closeEvent(event)
+        """Hide to the system tray instead of quitting.
+
+        The app only truly exits when the user selects "Quit Voice Input"
+        from the tray context menu (which calls _quit_app).
+        """
+        event.ignore()
+        self.hide()
+        # Show a one-time balloon so the user knows where to find the app.
+        # (Only available via QSystemTrayIcon on Linux; skip silently on macOS.)
+        if not self._tray_notified:
+            self._tray_notified = True
+            if (
+                self._tray_icon is not None
+                and self._tray_icon.supportsMessages()
+            ):
+                self._tray_icon.showMessage(
+                    "Voice Input",
+                    "Still running in the background — click the tray icon to reopen settings.",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    3000,
+                )
