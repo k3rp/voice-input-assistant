@@ -18,6 +18,7 @@ import os
 import platform
 import sys
 import threading
+import time
 
 from PyQt6.QtCore import QMimeData, QObject, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import QApplication
@@ -42,7 +43,8 @@ import postprocess as _postprocess
 from transcriber import transcribe_streaming
 from postprocess import postprocess
 from sounds import play_start, play_stop
-from overlay import TranscriptOverlay
+from sounds import play_start, play_stop
+from overlay import TranscriptOverlay, ReviewWindow, CorrectionWindow
 from ui import MainWindow
 
 
@@ -53,7 +55,7 @@ class AppController(QObject):
     blocking the UI.
     """
 
-    transcription_done = pyqtSignal(str, int, int)   # (text, seg_id, generation)
+    transcription_done = pyqtSignal(str, int, int, str)   # (text, seg_id, generation, mode)
     transcription_failed = pyqtSignal(str, int, int) # (msg, seg_id, generation)
     interim_transcript = pyqtSignal(str)        # emitted with live transcript text
 
@@ -66,9 +68,18 @@ class AppController(QObject):
 
         # Transcript overlay (replaces old recording / spinner bubbles)
         self._transcript_overlay = TranscriptOverlay()
+        
+        # Review Mode window
+        self._review_window = ReviewWindow()
+        self._review_window.insert_requested.connect(self._on_review_insert)
+        self._review_window.copy_requested.connect(self._on_review_copy)
+        
+        # Inline Corrections window
+        self._correction_window = CorrectionWindow()
+        self._correction_window.correction_added.connect(self._on_correction_added_from_ui)
 
         # Streaming state — per-job containers, keyed by segment id
-        # Each entry: {"thread": Thread, "result_box": [str|None]}
+        # Each entry: {"thread": Thread, "result_box": [str|None], "mode": str}
         self._active_job: dict | None = None
         self._is_recording = False
         self._generation = 0
@@ -85,6 +96,7 @@ class AppController(QObject):
         # Connect window signals
         self.window.recording_requested.connect(self.on_start_recording)
         self.window.recording_stopped.connect(self.on_stop_recording)
+        self.window.correction_requested.connect(self.on_correction_requested)
         self.window.cancel_requested.connect(self.on_cancel_all)
 
         # Connect result signals back to UI updates (both carry seg_id as 2nd arg)
@@ -147,6 +159,93 @@ class AppController(QObject):
             return False
         return False
 
+
+    @pyqtSlot()
+    def on_correction_requested(self):
+        """Triggered when the user hits the correction hotkey (Ctrl+Shift+F3)."""
+        from PyQt6.QtGui import QClipboard
+        clipboard = QApplication.clipboard()
+        
+        # 1. If ReviewWindow is open, grab the selected text directly from it!
+        if self._review_window.isVisible():
+            selected_text = self._review_window.text_edit.textCursor().selectedText().strip()
+            if not selected_text:
+                # If nothing is highlighted, just use the entire text box!
+                selected_text = self._review_window.text_edit.toPlainText().strip()
+            
+            if selected_text:
+                self._correction_window.show_with_text(selected_text)
+                return
+        
+        # 2. Check if we can get the highlighted text purely through the OS (works perfectly on Linux X11/Wayland)
+        selected_text = ""
+        if not _IS_MACOS:
+            selected_text = clipboard.text(QClipboard.Mode.Selection).strip()
+            
+        if selected_text:
+            # We got it instantly without macros!
+            self._correction_window.show_with_text(selected_text)
+            return
+
+        # 3. Fallback: use macro Ctrl+C (or Cmd+C)
+        # We need a small delay here so the user has time to physically lift their fingers off Ctrl/Shift,
+        # otherwise X11/Wayland will merge their physical keys with our synthetic 'C' keystroke,
+        # causing apps to type 'C' over their highlighted text!
+        time.sleep(0.1) # shorter debounce feels faster
+        
+        generation = self._bump_generation()
+        
+        # Save original clipboard contents
+        saved_mime = QMimeData()
+        source_mime = clipboard.mimeData()
+        if source_mime is not None:
+            for fmt in source_mime.formats():
+                saved_mime.setData(fmt, source_mime.data(fmt))
+                
+        # Clear clipboard so we know exactly when the copy succeeds
+        clipboard.clear()
+                
+        # Release potentially conflicting active modifiers that the user is physically holding (like Shift)
+        for k in (Key.shift, Key.shift_l, Key.shift_r, Key.alt, Key.alt_l, Key.alt_r):
+            self._kb.release(k)
+        
+        copy_mod = Key.cmd if _IS_MACOS else Key.ctrl
+        
+        # Fire pure Ctrl+C (or Cmd+C) over an aggressive double tap
+        # X11 sometimes misses the first hotkey input entirely when debouncing modifier releases
+        self._kb.press(copy_mod)
+        self._kb.press("c")
+        self._kb.release("c")
+        time.sleep(0.05)
+        self._kb.press("c")
+        self._kb.release("c")
+        self._kb.release(copy_mod)
+            
+        def _read_and_correct(attempts=0):
+            if generation != self._current_generation():
+                return
+            
+            # Read the copied text
+            selected_fallback = clipboard.text().strip()
+            
+            if not selected_fallback and attempts < 10:
+                # Poll clipboard every 50ms up to 500ms
+                self._schedule_timer(50, lambda: _read_and_correct(attempts + 1))
+                return
+            
+            # Restore the original clipboard silently in the background
+            clipboard.setMimeData(saved_mime)
+            
+            if not selected_fallback:
+                self.window.status_bar.showMessage("No text selected for correction.", 3000)
+                return
+                
+            # Open Correction Dialog!
+            self._correction_window.show_with_text(selected_fallback)
+            
+        # Give the target application time to react to the Ctrl+C event
+        self._schedule_timer(50, _read_and_correct)
+        
     def _current_generation(self) -> int:
         with self._generation_lock:
             return self._generation
@@ -171,14 +270,39 @@ class AppController(QObject):
         self._pending_timers.append(timer)
         timer.start(delay_ms)
 
+
+    @pyqtSlot(str, str)
+    def _on_correction_added_from_ui(self, original: str, replacement: str):
+        self.window._corrections[original] = replacement
+        self.window._save_settings()
+        self.window.status_bar.showMessage(f"Added correction: {original} -> {replacement}", 3000)
+        
+        # Super cool quality-of-life feature: If the Review window is currently open, dynamically
+        # search and replace the text inside it to instantly reflect the new rule!
+        if self._review_window.isVisible():
+            current_text = self._review_window.text_edit.toPlainText()
+            # Only replace if the original text was found
+            if original in current_text:
+                new_text = current_text.replace(original, replacement)
+                self._review_window.text_edit.setPlainText(new_text)
+
+
     def _cancel_pending_timers(self):
         for timer in self._pending_timers:
             timer.stop()
             timer.deleteLater()
         self._pending_timers.clear()
 
-    @pyqtSlot()
-    def on_start_recording(self):
+    @pyqtSlot(str)
+    def on_start_recording(self, mode: str):
+        if hasattr(self, "_correction_window") and self._correction_window.isVisible():
+            return # Ignore
+            
+        if self._review_window.isVisible():
+            # Treat F3 (start recording key) as an 'Insert' action if the review window is currently open
+            self._review_window._on_insert()
+            return
+            
         if self._is_recording:
             return
 
@@ -226,7 +350,7 @@ class AppController(QObject):
             args=(self.recorder.audio_queue, language, boost_words, boost_value, result_box),
             daemon=True,
         )
-        self._active_job = {"thread": thread, "result_box": result_box}
+        self._active_job = {"thread": thread, "result_box": result_box, "mode": mode}
         thread.start()
 
     @pyqtSlot()
@@ -255,6 +379,7 @@ class AppController(QObject):
         job = self._active_job
         thread_ref = job["thread"] if job else None
         result_box = job["result_box"] if job else [None]
+        mode = job["mode"] if job else "paste"
 
         self.window.set_status_transcribing()
 
@@ -263,7 +388,7 @@ class AppController(QObject):
         generation = self._current_generation()
         threading.Thread(
             target=self._wait_for_streaming,
-            args=(thread_ref, result_box, prompt, seg_id, generation),
+            args=(thread_ref, result_box, prompt, seg_id, generation, mode),
             daemon=True,
         ).start()
 
@@ -273,6 +398,7 @@ class AppController(QObject):
         self._bump_generation()
         self._is_recording = False
         self._active_job = None
+        self._review_window.hide()
 
         # Stop audio input immediately (safe to call if already stopped).
         self.recorder.stop()
@@ -306,6 +432,7 @@ class AppController(QObject):
         prompt: str,
         seg_id: int,
         generation: int,
+        mode: str,
     ):
         """
         Runs in a background thread.  Waits for *thread* to finish,
@@ -326,20 +453,20 @@ class AppController(QObject):
         # Post-process via Gemini if a prompt is configured
         if prompt:
             print(f"[Postprocess] Sending to Gemini… (Transcription: {text})")
-            text = postprocess(text, prompt)
+            text = postprocess(text, prompt, self.window._corrections)
             print(f"[Postprocess] Result: {text}")
 
         if generation != self._current_generation():
             return
 
-        self.transcription_done.emit(text, seg_id, generation)
+        self.transcription_done.emit(text, seg_id, generation, mode)
 
     # ------------------------------------------------------------------
-    # Clipboard-swap auto-paste
+    # Clipboard-swap auto-paste & Review flow
     # ------------------------------------------------------------------
 
-    @pyqtSlot(str, int, int)
-    def _on_transcription_done(self, text: str, seg_id: int, generation: int):
+    @pyqtSlot(str, int, int, str)
+    def _on_transcription_done(self, text: str, seg_id: int, generation: int, mode: str):
         if generation != self._current_generation():
             return
 
@@ -347,6 +474,13 @@ class AppController(QObject):
 
         # Remove this segment from the overlay; auto-hides if nothing remains.
         self._transcript_overlay.complete_segment(seg_id)
+        
+        if mode == "review":
+            # Hand it off to the review window instead of auto-inserting
+            self._review_window.show_with_text(text)
+            if not self._transcript_overlay.isVisible():
+                self.window.set_status_idle()
+            return
 
         clipboard = QApplication.clipboard()
 
@@ -397,6 +531,22 @@ class AppController(QObject):
         # Only return to idle once the overlay has nothing left to show
         if not self._transcript_overlay.isVisible():
             self.window.set_status_idle()
+
+    def _on_review_copy(self, text: str):
+        """Called when the user clicks Copy from the Review window."""
+        QApplication.clipboard().setText(text)
+        self.window.set_status_idle()
+
+    def _on_review_insert(self, text: str):
+        """Called when the user clicks Insert from the Review window."""
+        # 1. Switch focus back to the previous app
+        self._release_focus_to_input_app()
+        # 2. Wait a tiny bit, then trigger the normal auto-paste sequence.
+        #    We bump the generation to clear old timers just in case.
+        generation = self._bump_generation()
+        # Fake a seg_id just to satisfy the method signature. 
+        # The overlay segment is already cleared.
+        QTimer.singleShot(100, lambda: self._on_transcription_done(text, -1, generation, "paste"))
 
     @pyqtSlot(str, int, int)
     def _on_transcription_failed(self, msg: str, seg_id: int, generation: int):

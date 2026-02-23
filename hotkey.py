@@ -66,8 +66,17 @@ class HotkeyCombo:
 
 class HotkeySignals(QObject):
     """Qt signals emitted by the hotkey listener."""
+    # Primary (auto-paste)
     hotkey_pressed = pyqtSignal()
     hotkey_released = pyqtSignal()
+    
+    # Secondary (review mode)
+    secondary_hotkey_pressed = pyqtSignal()
+    secondary_hotkey_released = pyqtSignal()
+    
+    # Correction
+    correction_hotkey_pressed = pyqtSignal()
+    
     toggle_settings_requested = pyqtSignal()
     cancel_requested = pyqtSignal()  # Escape pressed: cancel all in-flight work
     key_event = pyqtSignal(object, bool)  # (key, is_press) — used for hotkey capture mode
@@ -82,20 +91,28 @@ class HotkeyListener:
 
     def __init__(self):
         self.signals = HotkeySignals()
-        self._combo: Optional[HotkeyCombo] = None
+        self._primary_combo: Optional[HotkeyCombo] = None
+        self._secondary_combo: Optional[HotkeyCombo] = None
+        self._correction_combo: Optional[HotkeyCombo] = None
+        
         self._active_modifiers: Set[str] = set()
-        self._main_key_down: bool = False
+        self._primary_down: bool = False
+        self._secondary_down: bool = False
+        
         self._listener: Optional[keyboard.Listener] = None
-        self._capture_mode: bool = False  # When True, next key press sets the hotkey
+        self._capture_mode: bool = False
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def set_hotkey(self, combo: HotkeyCombo):
-        """Set the hotkey combo to listen for."""
-        self._combo = combo
-        self._main_key_down = False
+    def set_hotkeys(self, primary: Optional[HotkeyCombo], secondary: Optional[HotkeyCombo], correction: Optional[HotkeyCombo]):
+        """Set the hotkey combos to listen for."""
+        self._primary_combo = primary
+        self._secondary_combo = secondary
+        self._correction_combo = correction
+        self._primary_down = False
+        self._secondary_down = False
 
     def start(self):
         """Start listening for global key events."""
@@ -122,13 +139,16 @@ class HotkeyListener:
     # Internal callbacks (run in pynput thread)
     # ------------------------------------------------------------------
 
+    def _matches(self, combo: Optional[HotkeyCombo], key_str: str) -> bool:
+        if combo is None or not combo.is_valid():
+            return False
+        return key_str == combo.main_key and self._active_modifiers == combo.modifiers
+
     def _on_press(self, key):
-        # Escape always means "cancel everything now", even outside capture mode.
         if key == Key.esc:
             self.signals.cancel_requested.emit()
             return
 
-        # In capture mode, forward every key press to the UI
         if self._capture_mode:
             self.signals.key_event.emit(key, True)
             return
@@ -143,16 +163,22 @@ class HotkeyListener:
             self.signals.toggle_settings_requested.emit()
             return
 
-        if self._combo is None or not self._combo.is_valid():
-            return
-
-        if (
-            key_str == self._combo.main_key
-            and self._active_modifiers == self._combo.modifiers
-            and not self._main_key_down
-        ):
-            self._main_key_down = True
+        # Check primary
+        if self._matches(self._primary_combo, key_str) and not self._primary_down:
+            self._primary_down = True
             self.signals.hotkey_pressed.emit()
+            return
+            
+        # Check secondary
+        if self._matches(self._secondary_combo, key_str) and not self._secondary_down:
+            self._secondary_down = True
+            self.signals.secondary_hotkey_pressed.emit()
+            return
+            
+        # Check correction (only fires on press, no hold duration needed)
+        if self._matches(self._correction_combo, key_str):
+            self.signals.correction_hotkey_pressed.emit()
+            return
 
     def _on_release(self, key):
         if self._capture_mode:
@@ -162,14 +188,14 @@ class HotkeyListener:
         if key in _MODIFIER_MAP:
             mod_name = _MODIFIER_MAP[key]
             self._active_modifiers.discard(mod_name)
-            # As per your suggestion, we no longer abort recording when a modifier
-            # is released. We ONLY care when the main hotkey itself is released.
-            return
-
-        if self._combo is None or not self._combo.is_valid():
             return
 
         key_str = key_to_str(key)
-        if key_str == self._combo.main_key and self._main_key_down:
-            self._main_key_down = False
+        
+        if self._primary_down and self._primary_combo and key_str == self._primary_combo.main_key:
+            self._primary_down = False
             self.signals.hotkey_released.emit()
+            
+        if self._secondary_down and self._secondary_combo and key_str == self._secondary_combo.main_key:
+            self._secondary_down = False
+            self.signals.secondary_hotkey_released.emit()

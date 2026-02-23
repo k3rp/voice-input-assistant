@@ -7,10 +7,19 @@ from __future__ import annotations
 
 import platform
 
+_IS_MACOS = platform.system() == "Darwin"
+
+
 from PyQt6.QtCore import Qt, QSize, QRect, QSettings, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
+    QInputDialog,
+    QMessageBox,
     QApplication,
+    QDialog,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -159,27 +168,98 @@ class _TwoLineDelegate(QStyledItemDelegate):
         total = title_h + self._LINE_SPACING + desc_h + self._PADDING * 2
         return QSize(option.rect.width(), total)
 
-# Default hotkey: F3
-DEFAULT_HOTKEY = HotkeyCombo(modifiers=set(), main_key="f3")
+# Default hotkeys
+DEFAULT_PRIMARY_HOTKEY = HotkeyCombo(modifiers=set(), main_key="f3")
+DEFAULT_SECONDARY_HOTKEY = HotkeyCombo(modifiers={"shift"}, main_key="f3")
+DEFAULT_CORRECTION_HOTKEY = HotkeyCombo(modifiers={"ctrl", "shift"}, main_key="f3")
 
+
+
+class CorrectionsDialog(QDialog):
+    def __init__(self, parent=None, corrections_dict=None):
+        from PyQt6.QtCore import Qt
+        super().__init__(parent)
+        self.setWindowTitle("Manage Corrections")
+        self.resize(500, 300)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+        self.corrections_dict = dict(corrections_dict) if corrections_dict else {}
+        
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Below are the current transcription correction rules:"))
+        
+        self.table = QTableWidget(0, 2)
+        self.table.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self.table.setHorizontalHeaderLabels(["If GCP hears...", "Replace with..."])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.setAlternatingRowColors(True)
+        layout.addWidget(self.table)
+        
+        for k, v in self.corrections_dict.items():
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self.table.setItem(row, 0, QTableWidgetItem(k))
+            self.table.setItem(row, 1, QTableWidgetItem(v))
+            
+        btn_row = QHBoxLayout()
+        add_btn = QPushButton("+ Add Row")
+        remove_btn = QPushButton("- Remove Selected")
+        btn_row.addWidget(add_btn)
+        btn_row.addWidget(remove_btn)
+        btn_row.addStretch(1)
+        
+        add_btn.clicked.connect(self._on_add)
+        remove_btn.clicked.connect(self._on_remove)
+        
+        layout.addLayout(btn_row)
+        
+        save_btn = QPushButton("Save & Close")
+        save_btn.clicked.connect(self.accept)
+        save_btn.setDefault(True)
+        layout.addWidget(save_btn)
+        
+    def _on_add(self):
+        self.table.insertRow(self.table.rowCount())
+        
+    def _on_remove(self):
+        r = self.table.currentRow()
+        if r >= 0:
+            self.table.removeRow(r)
+            
+    def get_corrections(self) -> dict:
+        d = {}
+        for r in range(self.table.rowCount()):
+            ki = self.table.item(r, 0)
+            vi = self.table.item(r, 1)
+            if ki and vi:
+                k = ki.text().strip()
+                v = vi.text().strip()
+                if k:
+                    d[k] = v
+        return d
 
 class MainWindow(QMainWindow):
     """Application main window."""
 
     # Signals emitted to the controller
-    recording_requested = pyqtSignal()    # hotkey pressed
-    recording_stopped = pyqtSignal()      # hotkey released
-    cancel_requested = pyqtSignal()       # escape pressed
+    recording_requested = pyqtSignal(str)   # hotkey pressed (with mode string)
+    recording_stopped = pyqtSignal()        # hotkey released
+    cancel_requested = pyqtSignal()         # escape pressed
+    correction_requested = pyqtSignal()     # correction hotkey pressed
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Voice Input — GCP Speech-to-Text")
         self.setMinimumWidth(480)
 
-        # Hotkey listener
+        # --- Hotkey listeners & state ---
         self._hotkey_listener = HotkeyListener()
-        self._current_combo: HotkeyCombo | None = None
-        self._capturing_hotkey = False
+        self._primary_combo: HotkeyCombo | None = None
+        self._secondary_combo: HotkeyCombo | None = None
+        self._correction_combo: HotkeyCombo | None = None
+        
+        self._capturing_target: str | None = None  # "primary", "secondary", "correction"
         self._capture_modifiers: set[str] = set()
 
         # Central widget
@@ -268,16 +348,29 @@ class MainWindow(QMainWindow):
         layout.addWidget(settings_group)
 
         # --- Hotkey group ---
-        hotkey_group = QGroupBox("Hotkey (Push-to-Talk)")
-        hotkey_layout = QHBoxLayout(hotkey_group)
+        hotkey_group = QGroupBox("Hotkeys")
+        hotkey_layout = QVBoxLayout(hotkey_group)
 
-        self.hotkey_label = QLabel(str(DEFAULT_HOTKEY))
-        self.hotkey_label.setStyleSheet("font-weight: bold; font-size: 14px;")
-        hotkey_layout.addWidget(self.hotkey_label)
+        # Helper method for building hotkey rows
+        def make_hotkey_row(label_text: str, attr_prefix: str, capture_type: str):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(label_text))
+            
+            lbl = QLabel()
+            lbl.setStyleSheet("font-weight: bold; font-size: 13px;")
+            setattr(self, f"_{attr_prefix}_label", lbl)
+            row.addWidget(lbl)
+            
+            btn = QPushButton("Set")
+            btn.setFixedWidth(60)
+            btn.clicked.connect(lambda _, t=capture_type: self._start_hotkey_capture(t))
+            setattr(self, f"_{attr_prefix}_btn", btn)
+            row.addWidget(btn)
+            return row
 
-        self.hotkey_btn = QPushButton("Set Hotkey")
-        self.hotkey_btn.clicked.connect(self._start_hotkey_capture)
-        hotkey_layout.addWidget(self.hotkey_btn)
+        hotkey_layout.addLayout(make_hotkey_row("Primary (Push-to-Talk & Insert):", "primary", "primary"))
+        hotkey_layout.addLayout(make_hotkey_row("Secondary (Push-to-Talk Review):", "secondary", "secondary"))
+        hotkey_layout.addLayout(make_hotkey_row("Correction (Correct Selected Text):", "correction", "correction"))
 
         layout.addWidget(hotkey_group)
 
@@ -316,6 +409,16 @@ class MainWindow(QMainWindow):
 
         # Internal list of active boost words (populated by _on_boost_update)
         self._boost_words: list[str] = []
+        self._corrections: dict[str, str] = {}
+
+        # --- Corrections group ---
+        corr_group = QGroupBox("Word Corrections")
+        corr_layout = QVBoxLayout(corr_group)
+        corr_layout.addWidget(QLabel("Highlight text anywhere and press Ctrl+Shift+F3 to add a new rule."))
+        self.manage_corr_btn = QPushButton("Manage Corrections...")
+        self.manage_corr_btn.clicked.connect(self._on_manage_corr_clicked)
+        corr_layout.addWidget(self.manage_corr_btn)
+        layout.addWidget(corr_group)
 
         # --- Post transcription editing group ---
         postproc_group = QGroupBox("AI Post Transcription Editing")
@@ -337,6 +440,12 @@ class MainWindow(QMainWindow):
         # --- Connect hotkey listener signals ---
         self._hotkey_listener.signals.hotkey_pressed.connect(self._on_hotkey_pressed)
         self._hotkey_listener.signals.hotkey_released.connect(self._on_hotkey_released)
+        
+        self._hotkey_listener.signals.secondary_hotkey_pressed.connect(self._on_secondary_hotkey_pressed)
+        self._hotkey_listener.signals.secondary_hotkey_released.connect(self._on_secondary_hotkey_released)
+        
+        self._hotkey_listener.signals.correction_hotkey_pressed.connect(self._on_correction_hotkey_pressed)
+        
         self._hotkey_listener.signals.toggle_settings_requested.connect(self._toggle_window)
         self._hotkey_listener.signals.cancel_requested.connect(self._on_cancel_requested)
         self._hotkey_listener.signals.key_event.connect(self._on_capture_key_event)
@@ -345,8 +454,8 @@ class MainWindow(QMainWindow):
         self._settings = QSettings()
         self._restore_settings()
 
-        # Start the global listener with the (possibly restored) hotkey
-        self._hotkey_listener.set_hotkey(self._current_combo)
+        # Start the global listener with the restored hotkeys
+        self._hotkey_listener.set_hotkeys(self._primary_combo, self._secondary_combo, self._correction_combo)
         self._hotkey_listener.start()
 
         # --- Auto-save on change ---
@@ -570,6 +679,18 @@ class MainWindow(QMainWindow):
     # Status helpers
     # ------------------------------------------------------------------
 
+
+    @pyqtSlot()
+    def _on_manage_corr_clicked(self):
+        from PyQt6.QtCore import Qt
+        dialog = CorrectionsDialog(self, getattr(self, "_corrections", {}))
+        if hasattr(self, "_macos_status_bar") and getattr(self, "_macos_status_bar", None):
+            dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+        if dialog.exec():
+            self._corrections = dialog.get_corrections()
+            self._save_settings()
+            self.status_bar.showMessage("Corrections saved.", 2000)
+
     def _set_status(self, text: str):
         self.status_bar.showMessage(text)
 
@@ -586,19 +707,23 @@ class MainWindow(QMainWindow):
     # Hotkey capture
     # ------------------------------------------------------------------
 
-    def _start_hotkey_capture(self):
-        """Enter hotkey capture mode."""
-        self._capturing_hotkey = True
+    def _start_hotkey_capture(self, target: str):
+        """Enter hotkey capture mode for a specific target."""
+        self._capturing_target = target
         self._capture_modifiers = set()
-        self.hotkey_btn.setText("Press keys…")
-        self.hotkey_btn.setEnabled(False)
-        self.hotkey_label.setText("Listening…")
+        
+        btn = getattr(self, f"_{target}_btn")
+        lbl = getattr(self, f"_{target}_label")
+        
+        btn.setText("Press keys…")
+        btn.setEnabled(False)
+        lbl.setText("Listening…")
         self._hotkey_listener.set_capture_mode(True)
 
     @pyqtSlot(object, bool)
     def _on_capture_key_event(self, key, is_press: bool):
         """Handle key events during hotkey capture."""
-        if not self._capturing_hotkey:
+        if not self._capturing_target:
             return
 
         if is_press:
@@ -615,26 +740,46 @@ class MainWindow(QMainWindow):
 
     def _finish_hotkey_capture(self, combo: HotkeyCombo):
         """Finish capturing and apply the new hotkey."""
-        self._capturing_hotkey = False
+        target = self._capturing_target
+        self._capturing_target = None
         self._hotkey_listener.set_capture_mode(False)
-        self._current_combo = combo
-        self._hotkey_listener.set_hotkey(combo)
-        self.hotkey_label.setText(str(combo))
-        self.hotkey_btn.setText("Set Hotkey")
-        self.hotkey_btn.setEnabled(True)
+        
+        setattr(self, f"_{target}_combo", combo)
+        
+        self._hotkey_listener.set_hotkeys(self._primary_combo, self._secondary_combo, self._correction_combo)
+        
+        btn = getattr(self, f"_{target}_btn")
+        lbl = getattr(self, f"_{target}_label")
+        lbl.setText(str(combo))
+        btn.setText("Set")
+        btn.setEnabled(True)
         self._save_settings()
 
     # ------------------------------------------------------------------
     # Hotkey press / release (forwarded as signals)
     # ------------------------------------------------------------------
 
+    # We need to tell the caller WHICH hotkey invoked it
+
     @pyqtSlot()
     def _on_hotkey_pressed(self):
-        self.recording_requested.emit()
+        self.recording_requested.emit("paste")
 
     @pyqtSlot()
     def _on_hotkey_released(self):
         self.recording_stopped.emit()
+
+    @pyqtSlot()
+    def _on_secondary_hotkey_pressed(self):
+        self.recording_requested.emit("review")
+
+    @pyqtSlot()
+    def _on_secondary_hotkey_released(self):
+        self.recording_stopped.emit()
+
+    @pyqtSlot()
+    def _on_correction_hotkey_pressed(self):
+        self.correction_requested.emit()
 
     @pyqtSlot()
     def _on_cancel_requested(self):
@@ -659,6 +804,45 @@ class MainWindow(QMainWindow):
         else:
             print("[BoostWords] Cleared — no boost phrases will be sent to the API.")
 
+
+    def prompt_for_correction(self, selected_text: str):
+        """Prompt the user for a transcription correction rule."""
+        from PyQt6.QtWidgets import QInputDialog, QMessageBox
+        from PyQt6.QtCore import Qt, QCoreApplication
+        
+        # We need to ensure the dialog is active properly without losing it behind the current app
+        prev_app = None
+        if _IS_MACOS:
+            from overlay import _get_frontmost_app
+            prev_app = _get_frontmost_app()
+            try:
+                from AppKit import NSApplication
+                NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+            except ImportError:
+                pass
+        
+        # Create an independent top-level dialog that stays on top without showing the Main Window
+        dialog = QInputDialog(None)
+        dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+        dialog.setWindowTitle("Add Correction Rule")
+        dialog.setLabelText(f"Whenever GCP hears:\n\"{selected_text}\"\n\nWhat should it be replaced with?")
+        dialog.setTextValue(selected_text)
+        
+        QCoreApplication.processEvents()
+        ok = dialog.exec()
+        correction = dialog.textValue()
+
+        if ok and correction.strip():
+            self._corrections[selected_text.strip()] = correction.strip()
+            self._save_settings()
+            self.status_bar.showMessage(f"Added correction: {selected_text} -> {correction}", 3000)
+        else:
+            self.status_bar.showMessage("Correction cancelled.", 2000)
+            
+        if _IS_MACOS and prev_app:
+            from overlay import _activate_app
+            _activate_app(prev_app)
+            
     def _clear_initial_focus(self):
         focused = QApplication.focusWidget()
         if focused is not None:
@@ -701,27 +885,46 @@ class MainWindow(QMainWindow):
             except (ValueError, TypeError):
                 pass
 
-        # Hotkey
-        saved_modifiers = self._settings.value("hotkey/modifiers", None)
-        saved_main_key = self._settings.value("hotkey/main_key", None)
-        if saved_main_key is not None:
-            mods = set(saved_modifiers) if saved_modifiers else set()
-            combo = HotkeyCombo(modifiers=mods, main_key=saved_main_key)
-        else:
-            combo = DEFAULT_HOTKEY
-        self._current_combo = combo
-        self.hotkey_label.setText(str(combo))
+        # Hotkeys
+        def load_combo(prefix: str, default: HotkeyCombo):
+            mods = self._settings.value(f"{prefix}_hotkey/modifiers", None)
+            key = self._settings.value(f"{prefix}_hotkey/main_key", None)
+            if key is not None:
+                if isinstance(mods, str):
+                    modifiers_set = {mods}
+                elif isinstance(mods, (list, tuple)):
+                    modifiers_set = set(mods)
+                else:
+                    modifiers_set = set()
+                combo = HotkeyCombo(modifiers=modifiers_set, main_key=key)
+            else:
+                combo = default
+            setattr(self, f"_{prefix}_combo", combo)
+            getattr(self, f"_{prefix}_label").setText(str(combo))
+
+        load_combo("primary", DEFAULT_PRIMARY_HOTKEY)
+        load_combo("secondary", DEFAULT_SECONDARY_HOTKEY)
+        load_combo("correction", DEFAULT_CORRECTION_HOTKEY)
 
     def _save_settings(self):
         """Persist current settings."""
+        settings_arr = [f"{k}:::{v}" for k, v in self._corrections.items() if k]
+        self._settings.setValue("corrections_table_data", settings_arr)
         self._settings.setValue("api_key", self.api_key_input.text().strip())
         self._settings.setValue("language", self.language_combo.currentData())
         self._settings.setValue("postproc_prompt", self.postproc_prompt.toPlainText())
         self._settings.setValue("boost_words", self.boost_words_input.text())
         self._settings.setValue("boost_value", self.boost_value_spin.value())
-        if self._current_combo is not None:
-            self._settings.setValue("hotkey/modifiers", list(self._current_combo.modifiers))
-            self._settings.setValue("hotkey/main_key", self._current_combo.main_key)
+        
+        def save_combo(prefix: str):
+            combo = getattr(self, f"_{prefix}_combo")
+            if combo is not None:
+                self._settings.setValue(f"{prefix}_hotkey/modifiers", list(combo.modifiers))
+                self._settings.setValue(f"{prefix}_hotkey/main_key", combo.main_key)
+                
+        save_combo("primary")
+        save_combo("secondary")
+        save_combo("correction")
 
     # ------------------------------------------------------------------
     # Cleanup

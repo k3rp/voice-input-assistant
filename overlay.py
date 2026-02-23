@@ -12,12 +12,13 @@ from __future__ import annotations
 import html
 import platform
 
-from PyQt6.QtCore import Qt, QTimer, QPoint, QRectF, QSizeF
+from PyQt6.QtCore import Qt, QTimer, QPoint, QRectF, QSizeF, pyqtSignal
 from PyQt6.QtGui import (
+    QShortcut, QKeySequence,
     QColor, QPainter, QPen, QCursor, QBrush, QConicalGradient,
     QFont, QFontMetrics, QTextOption, QTextDocument,
 )
-from PyQt6.QtWidgets import QWidget, QApplication
+from PyQt6.QtWidgets import QWidget, QApplication, QVBoxLayout, QHBoxLayout, QPushButton, QPlainTextEdit, QLineEdit, QLabel
 
 _IS_MACOS = platform.system() == "Darwin"
 
@@ -489,11 +490,12 @@ class TranscriptOverlay(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         # Dark rounded-rect background
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(25, 25, 25, 220))
-        painter.drawRoundedRect(
-            self.rect(), _OVERLAY_CORNER_RADIUS, _OVERLAY_CORNER_RADIUS,
-        )
+        painter.setBrush(QColor(30, 30, 30, 240))
+        painter.setPen(QPen(QColor(80, 80, 80, 150), 1))
+        
+        rect = self.rect()
+        rect.adjust(1, 1, -2, -2) # thick soft borders
+        painter.drawRoundedRect(rect, 12, 12)
 
         p = _OVERLAY_PADDING
         max_text_w = self.width() - 2 * p
@@ -508,6 +510,349 @@ class TranscriptOverlay(QWidget):
             text_rect = QRectF(p, p, max_text_w, self.height() - 2 * p)
             option = QTextOption()
             option.setWrapMode(QTextOption.WrapMode.WordWrap)
-            painter.drawText(text_rect, "Listening…", option)
-
         painter.end()
+
+
+# -----------------------------------------------------------------------
+# Review Window — editable transcript with Insert, Copy, Close buttons
+# -----------------------------------------------------------------------
+
+class ReviewWindow(QWidget):
+    """
+    A floating window shown after a Secondary Hotkey transcription is complete.
+    Allows the user to manually edit the text before inserting, copying, or discarding.
+    """
+
+    # Signals for the controller
+    insert_requested = pyqtSignal(str)   # text
+    copy_requested = pyqtSignal(str)     # text
+    closed = pyqtSignal()
+
+    def __init__(self):
+        super().__init__(None)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+        if _IS_MACOS:
+            self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow)
+
+        # Build UI
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(12)
+
+        font_name = "SF Pro Text" if _IS_MACOS else "Segoe UI"
+        font = QFont(font_name, 14)
+
+        self.text_edit = QPlainTextEdit()
+        self.text_edit.setFont(font)
+        # Match main UI styling
+        self.setStyleSheet("""
+            * {
+                color: #e0e0e0;
+            }
+            QPushButton {
+                background-color: #333333;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                padding: 6px 16px;
+                color: #ffffff;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: #404040;
+                border-color: #555555;
+            }
+            QPushButton:pressed {
+                background-color: #2d2d2d;
+            }
+            QPlainTextEdit {
+                background-color: #2b2b2b;
+                border: 1px solid #3d3d3d;
+                border-radius: 6px;
+                padding: 8px;
+                selection-background-color: #444;
+            }
+            QPlainTextEdit:focus {
+                border: 1px solid #666;
+            }
+        """)
+        layout.addWidget(self.text_edit)
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(8)
+
+        self.btn_insert = QPushButton("✨ Insert")
+        self.btn_insert.setToolTip("Auto-paste text into the last app and close (F3)")
+        
+        self.btn_copy = QPushButton("📋 Copy")
+        self.btn_copy.setToolTip("Copy text to clipboard and close (Ctrl+C)")
+        
+        self.btn_close = QPushButton("❌ Cancel")
+        self.btn_close.setToolTip("Discard transcript and close (Esc)")
+
+
+
+        btn_layout.addWidget(self.btn_insert)
+        btn_layout.addWidget(self.btn_copy)
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.btn_close)
+
+        layout.addLayout(btn_layout)
+
+        # Connections
+        self.btn_insert.clicked.connect(self._on_insert)
+        self.btn_copy.clicked.connect(self._on_copy)
+        self.btn_close.clicked.connect(self._on_close)
+        
+        # Robust hotkeys that intercept even when QPlainTextEdit is focused
+
+
+        self.setFixedSize(450, 160)
+        # Install an event filter to intercept keystrokes inside the text editor
+        self.text_edit.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        from PyQt6.QtCore import QEvent, Qt
+        if obj is self.text_edit and event.type() == QEvent.Type.KeyPress:
+            key = event.key()
+            modifiers = event.modifiers()
+            
+            if key == Qt.Key.Key_Escape:
+                self._on_close()
+                return True
+                
+            elif key == Qt.Key.Key_C and (modifiers & Qt.KeyboardModifier.ControlModifier or modifiers & Qt.KeyboardModifier.MetaModifier):
+                # The user hit Ctrl+C! We powerfully copy the selection (or whole text) and close.
+                self._on_copy()
+                return True
+                
+
+                
+            elif key == Qt.Key.Key_Return and (modifiers & Qt.KeyboardModifier.ControlModifier or modifiers & Qt.KeyboardModifier.MetaModifier):
+                self._on_insert()
+                return True
+                
+        return super().eventFilter(obj, event)
+
+    def show_with_text(self, text: str):
+        """Populate the text editor and show the window."""
+        self.text_edit.setPlainText(text)
+        
+        # Position offset directly to the bottom right of the cursor (matching the transcription bubble)
+        pos = QCursor.pos()
+        target_pos = pos + QPoint(24, 24)
+        
+        screen = QApplication.screenAt(pos)
+        if screen:
+            geom = screen.availableGeometry()
+            # Clamp the window to the screen bounds to prevent it from going off-edge
+            
+            # If the window would overflow the right side, flip it to the left side of the cursor
+            if target_pos.x() + self.width() > geom.right() - 20:
+                target_pos.setX(pos.x() - self.width() - 24)
+                
+            # If the window would overflow the bottom side, flip it above the cursor
+            if target_pos.y() + self.height() > geom.bottom() - 20:
+                target_pos.setY(pos.y() - self.height() - 24)
+                
+            # Final hard clamp in case the cursor is in a weird absolute corner and the flip still overflows
+            target_pos.setX(max(geom.left() + 20, min(target_pos.x(), geom.right() - self.width() - 20)))
+            target_pos.setY(max(geom.top() + 20, min(target_pos.y(), geom.bottom() - self.height() - 20)))
+        
+        self.move(target_pos)
+            
+        prev = _get_frontmost_app()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.text_edit.setFocus()
+        
+        # Don't reactivate the old app here, because the user actually needs
+        # to interact with this window to click the buttons/edit text!
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # We fill it with a frosted glass-like dark bubble
+        painter.setBrush(QColor(30, 30, 30, 240))
+        painter.setPen(QPen(QColor(80, 80, 80, 150), 1))
+        
+        rect = self.rect()
+        rect.adjust(1, 1, -2, -2) # thick soft borders
+        painter.drawRoundedRect(rect, 12, 12)
+        painter.end()
+
+    def _on_insert(self):
+        text = self.text_edit.toPlainText().strip()
+        self.hide()
+        self.insert_requested.emit(text)
+
+    def _on_copy(self):
+        text = self.text_edit.textCursor().selectedText().strip()
+        if not text:
+            text = self.text_edit.toPlainText().strip()
+        self.hide()
+        self.copy_requested.emit(text)
+
+
+    def keyPressEvent(self, event):
+        from PyQt6.QtCore import Qt
+        # Intercept hotkeys inside the UI
+        modifiers = event.modifiers()
+        key = event.key()
+        
+        if key == Qt.Key.Key_Escape:
+            self._on_close()
+        elif key == Qt.Key.Key_C and (modifiers & Qt.KeyboardModifier.ControlModifier or modifiers & Qt.KeyboardModifier.MetaModifier):
+            self._on_copy()
+        # F3 and Shift+F3 are handled gracefully by the global pynput hotkey listener triggering main.py
+        else:
+            super().keyPressEvent(event)
+
+    def _on_close(self):
+        self.hide()
+        self.closed.emit()
+
+class CorrectionWindow(QWidget):
+    """A floating window for adding in-line word correction rules."""
+    correction_added = pyqtSignal(str, str)
+    closed = pyqtSignal()
+
+    def __init__(self):
+        super().__init__(None)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+        if _IS_MACOS:
+            self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(10)
+
+        font_name = "SF Pro Text" if _IS_MACOS else "Segoe UI"
+        font = QFont(font_name, 14)
+
+        self.label = QLabel()
+        self.label.setFont(font)
+        
+        self.input_edit = QLineEdit()
+        self.input_edit.setFont(font)
+        self.input_edit.returnPressed.connect(self._on_save)
+
+        self.setStyleSheet("""
+            * {
+                color: #e0e0e0;
+            }
+            QPushButton {
+                background-color: #333333;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                padding: 6px 16px;
+                color: #ffffff;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: #404040;
+                border-color: #555555;
+            }
+            QPushButton:pressed {
+                background-color: #2d2d2d;
+            }
+            QLineEdit {
+                background-color: #2b2b2b;
+                border: 1px solid #3d3d3d;
+                border-radius: 6px;
+                padding: 8px;
+                selection-background-color: #444;
+            }
+            QLineEdit:focus {
+                border: 1px solid #666;
+            }
+        """)
+
+        layout.addWidget(self.label)
+        layout.addWidget(self.input_edit)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(8)
+
+        self.btn_save = QPushButton("✨ Add Rule")
+        self.btn_save.setToolTip("Save correction rule and close (Enter)")
+        
+        self.btn_close = QPushButton("❌ Cancel")
+        self.btn_close.setToolTip("Discard and close (Esc)")
+
+        btn_layout.addWidget(self.btn_save)
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.btn_close)
+
+        layout.addLayout(btn_layout)
+
+        self.btn_save.clicked.connect(self._on_save)
+        self.btn_close.clicked.connect(self._on_close)
+
+        self.setFixedSize(420, 130)
+        self._original_text = ""
+
+    def show_with_text(self, text: str):
+        self._original_text = text.strip()
+        self.label.setText(f"Whenever GCP hears: <b>\"{self._original_text}\"</b>")
+        self.input_edit.setText(self._original_text)
+        self.input_edit.selectAll()
+        
+        pos = QCursor.pos()
+        target_pos = pos + QPoint(24, 24)
+        screen = QApplication.screenAt(pos)
+        if screen:
+            geom = screen.availableGeometry()
+            if target_pos.x() + self.width() > geom.right() - 20:
+                target_pos.setX(pos.x() - self.width() - 24)
+            if target_pos.y() + self.height() > geom.bottom() - 20:
+                target_pos.setY(pos.y() - self.height() - 24)
+                
+        self.move(target_pos)
+        prev = _get_frontmost_app()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        _reactivate_app(prev)
+        self.input_edit.setFocus()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(QColor(30, 30, 30, 240))
+        painter.setPen(QPen(QColor(80, 80, 80, 150), 1))
+        rect = self.rect()
+        rect.adjust(1, 1, -2, -2)
+        painter.drawRoundedRect(rect, 12, 12)
+        painter.end()
+
+    def _on_save(self):
+        new_text = self.input_edit.text().strip()
+        if new_text and self._original_text:
+            self.correction_added.emit(self._original_text, new_text)
+        self._on_close()
+
+    def _on_close(self):
+        self.hide()
+        self.closed.emit()
+
+    def keyPressEvent(self, event):
+        from PyQt6.QtCore import Qt
+        if event.key() == Qt.Key.Key_Escape:
+            self._on_close()
+        else:
+            super().keyPressEvent(event)

@@ -61,7 +61,26 @@ def _get_client() -> genai.Client:
     return _client
 
 
-def postprocess(transcript: str, prompt: str) -> str:
+def apply_corrections(text: str, corrections_map: dict[str, str]) -> str:
+    """
+    Apply a dictionary of custom string replacements.
+    We do this word-by-word or exact match to avoid breaking partial words,
+    but for now a simple string replacement (case-insensitive) is a good start.
+    """
+    if not corrections_map:
+        return text
+        
+    import re
+    result = text
+    for old_text, new_text in corrections_map.items():
+        if not old_text: continue
+        # Simple whole word / exact phrase case-insensitive replace
+        pattern = re.compile(r"\b" + re.escape(old_text) + r"\b", re.IGNORECASE)
+        result = pattern.sub(new_text, result)
+        
+    return result
+
+def postprocess(transcript: str, prompt: str, corrections_map: dict[str, str] = None) -> str:
     """
     Send *transcript* + *prompt* to Gemini and return the model's response.
 
