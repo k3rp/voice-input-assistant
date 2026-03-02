@@ -32,6 +32,7 @@ Layout (bottom-anchored, transparent window)
 
 from __future__ import annotations
 
+import datetime
 import platform
 from typing import Callable
 
@@ -50,6 +51,7 @@ from PyQt6.QtGui import (
     QColor,
     QCursor,
     QFont,
+    QFontMetrics,
     QLinearGradient,
     QPainter,
     QPainterPath,
@@ -58,6 +60,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QApplication,
     QHBoxLayout,
+    QLabel,
     QScrollArea,
     QSizePolicy,
     QTextEdit,
@@ -264,7 +267,22 @@ class MessageItem(QWidget):
         font_name = "SF Pro Text" if _IS_MACOS else "Segoe UI"
         self._font = QFont(font_name, 14)
         self._font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+        
+        self._time_font = QFont(font_name, 10)
+        self._time_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
 
+        self._created_at = datetime.datetime.now()
+        
+        self._time_label = QLabel(self)
+        self._time_label.setFont(self._time_font)
+        self._time_label.setStyleSheet("color: rgba(160, 160, 160, 255);")
+        self._time_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
+        self._update_time_text()
+
+        self._time_updater = QTimer(self)
+        self._time_updater.timeout.connect(self._update_time_text)
+        self._time_updater.start(30000) # Update every 30s
+        
         self._text_edit = QTextEdit(self)
         self._text_edit.setReadOnly(True)
         self._text_edit.setFrameShape(QTextEdit.Shape.NoFrame)
@@ -296,6 +314,27 @@ class MessageItem(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Preferred,
                            QSizePolicy.Policy.Minimum)
         self._update_height()
+
+    def _update_time_text(self):
+        now = datetime.datetime.now()
+        diff = now - self._created_at
+        seconds = int(diff.total_seconds())
+        if seconds < 60:
+            text = "just now"
+        else:
+            minutes = seconds // 60
+            if minutes < 60:
+                text = f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+            else:
+                hours = minutes // 60
+                if hours < 24:
+                    text = f"{hours} hour{'s' if hours != 1 else ''} ago"
+                else:
+                    days = hours // 24
+                    text = f"{days} day{'s' if days != 1 else ''} ago"
+        self._time_label.setText(text)
+        self._time_label.adjustSize()
+        self._place_children()
 
     # ── display helpers ──────────────────────────────────────────────────────
 
@@ -329,28 +368,38 @@ class MessageItem(QWidget):
 
     def _update_height(self):
         doc = self._text_edit.document()
-        tw = _OVERLAY_MAX_TEXT_W
-        doc.setTextWidth(tw)
-        doc_h = int(doc.size().height())
-        bubble_h = max(doc_h + _BUBBLE_PADDING * 2, 44)
-        new_h = bubble_h
-        if new_h != self.height():
-            self.setFixedHeight(new_h)
-            self.content_resized.emit()
+        doc.setTextWidth(_OVERLAY_MAX_TEXT_W)
+        text_h = int(doc.size().height())
+        # Add padding for text and extra space for the timestamp at the bottom
+        fm = QFontMetrics(self._time_font)
+        time_h = fm.height()
+        h = text_h + 2 * _BUBBLE_PADDING + time_h
+        h = max(h, _BTN_SIZE + 2 * _BUBBLE_PADDING)
+        self.setFixedHeight(h)
+        self.content_resized.emit()
 
     def _place_children(self):
-        w = self.width()
-        h = self.height()
-        bar = self._action_bar
+        # Place the text edit
+        fm = QFontMetrics(self._time_font)
+        time_h = fm.height()
         
-        # Position slightly inward from the top-right corner to prevent spilling
-        bar.move(w - bar.width() - 4, 4)
-        bar.raise_()
-
         self._text_edit.setGeometry(
-            _BUBBLE_PADDING, _BUBBLE_PADDING,
-            w - 2 * _BUBBLE_PADDING,
-            h - 2 * _BUBBLE_PADDING,
+            _BUBBLE_PADDING,
+            _BUBBLE_PADDING,
+            self.width() - 2 * _BUBBLE_PADDING,
+            self.height() - 2 * _BUBBLE_PADDING - time_h
+        )
+
+        # Place the time label
+        self._time_label.move(
+            self.width() - self._time_label.width() - _BUBBLE_PADDING,
+            self.height() - self._time_label.height() - _BUBBLE_PADDING
+        )
+
+        # The action bar floats above the top-right
+        self._action_bar.move(
+            self.width() - _ABAR_W,
+            -(_ABAR_H + 4)
         )
 
     # ── event overrides ──────────────────────────────────────────────────────
@@ -389,6 +438,7 @@ class MessageItem(QWidget):
             self._text_edit.viewport().setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             self._editing = False
             self._apply_text_color()
+            self._time_label.setVisible(True)
             self.edit_ended.emit()
             # Hover state will be restored by the polling timer next tick
             self._action_bar.hide()
@@ -422,6 +472,7 @@ class MessageItem(QWidget):
         
         self._editing = True
         self._apply_text_color()
+        self._time_label.setVisible(False)
         self.edit_started.emit()
         
         self._focus_enforcer.start()
