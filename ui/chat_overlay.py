@@ -257,6 +257,9 @@ class MessageItem(QWidget):
         self._state     = state   # "processing" or "done"
         self._msg_id    = -1      # set by ChatHistoryOverlay
         self._spin_frame = 0
+        self._focus_enforcer = QTimer(self)
+        self._focus_enforcer.setInterval(10)
+        self._focus_enforcer.timeout.connect(self._do_focus)
 
         font_name = "SF Pro Text" if _IS_MACOS else "Segoe UI"
         self._font = QFont(font_name, 14)
@@ -376,6 +379,9 @@ class MessageItem(QWidget):
         QTextEdit.focusInEvent(self._text_edit, event)
 
     def _text_focus_out(self, event):
+        if self._focus_enforcer.isActive():
+            return
+
         if self._editing:
             self._text_edit.setReadOnly(True)
             self._text_edit.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
@@ -385,7 +391,9 @@ class MessageItem(QWidget):
             self.edit_ended.emit()
             # Hover state will be restored by the polling timer next tick
             self._action_bar.hide()
-        QTextEdit.focusOutEvent(self._text_edit, event)
+            
+        if event is not None:
+            QTextEdit.focusOutEvent(self._text_edit, event)
 
     # ── button handlers ──────────────────────────────────────────────────────
 
@@ -404,14 +412,29 @@ class MessageItem(QWidget):
         self._text_edit.setReadOnly(False)
         self._text_edit.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         self._text_edit.viewport().setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        
         self._editing = True
         self._apply_text_color()
-        self._text_edit.setFocus()
+        self.edit_started.emit()
+        
+        self._focus_enforcer.start()
+        
         cursor = self._text_edit.textCursor()
         cursor.movePosition(cursor.MoveOperation.End)
         self._text_edit.setTextCursor(cursor)
         self._action_bar.hide()
-        self.edit_started.emit()
+        
+        QTimer.singleShot(1000, self._stop_focus_enforcer)
+
+    def _do_focus(self):
+        if self.window():
+            self.window().activateWindow()
+        self._text_edit.setFocus()
+
+    def _stop_focus_enforcer(self):
+        self._focus_enforcer.stop()
+        if not self._text_edit.hasFocus():
+            self._text_focus_out(None)
 
     # ── public API ───────────────────────────────────────────────────────────
 
