@@ -1,5 +1,5 @@
 """
-PyQt6 main window: tabbed settings UI for Voice Input.
+PyQt6 main window: tabbed settings UI for VIA.
 
 Settings tab  — API key, hotkey, language selection.
 Advanced tab  — boost words and AI post-processing prompt.
@@ -138,8 +138,8 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Voice Input — GCP Speech-to-Text")
-        self.setFixedWidth(620)
+        self.setWindowTitle("VIA — GCP Speech-to-Text")
+        self.setFixedWidth(740)
 
         # Hotkey listener
         self._hotkey_listener = HotkeyListener()
