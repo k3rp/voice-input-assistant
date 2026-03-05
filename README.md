@@ -61,6 +61,8 @@ Before running the application on macOS, you must grant appropriate permissions:
 2. Go to **Accessibility** and enable it for your "host" application (e.g., Terminal, iTerm2, or VS Code).
 3. Do the same under **Input Monitoring** to allow the application to listen for global hotkeys.
 
+> **Note on using the `Fn` (Globe) key as a hotkey:** If you intend to use the `Fn` key as your hotkey, you will likely need to disable macOS system shortcuts that use it to prevent conflicts.
+
 ```bash
 # Clone the repository
 git clone https://github.com/yuhao-he/voice-input-assistant.git
