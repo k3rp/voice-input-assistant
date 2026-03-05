@@ -335,7 +335,7 @@ class MainWindow(QMainWindow):
         self.postproc_prompt = QPlainTextEdit()
         self.postproc_prompt.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.postproc_prompt.setPlaceholderText(
-            "e.g.  Fix grammar and repetition, and keep the original words as much as possible."
+            "Help me fix grammar, punctuation, and repetitions. I may correct myself in the middle of the speech; also apply these corrections as instructed."
         )
         self.postproc_prompt.setMinimumHeight(240)
         postproc_layout.addWidget(self.postproc_prompt)
@@ -619,8 +619,9 @@ class MainWindow(QMainWindow):
                     self.language_combo.setCurrentIndex(i)
                     break
 
-        saved_prompt = self._settings.value("postproc_prompt", "")
-        self.postproc_prompt.setPlainText(saved_prompt or "")
+        default_prompt = "Help me fix grammar, punctuation, and repetitions. I may correct myself in the middle of the speech; also apply these corrections as instructed."
+        saved_prompt = self._settings.value("postproc_prompt", default_prompt)
+        self.postproc_prompt.setPlainText(saved_prompt or default_prompt)
 
         saved_boost = self._settings.value("boost_words", "")
         if saved_boost:
